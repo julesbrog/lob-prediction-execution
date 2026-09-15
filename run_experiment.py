@@ -3,7 +3,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from lob.backtest import run_backtest
+from lob.backtest import (
+    run_backtest,
+    run_backtest_with_latency,
+)
 from lob.data import (
     align_events,
     compute_horizon_duration,
@@ -61,6 +64,8 @@ OFI_FEATURE_COLUMNS = FEATURE_COLUMNS + [f"ofi_{window}" for window in WINDOWS]
 SIGNAL_THRESHOLD = 0.3
 TRADE_QUANTITY = 1
 FEE_PER_SHARE = 0.0
+
+LATENCY_SCENARIOS = (0.0, 0.001, 0.010)
 
 
 def main() -> None:
@@ -330,6 +335,72 @@ def main() -> None:
         .round(4)
         .to_string()
     )
+    # Restrict execution data to events strictly before the test block.
+    val_end = splits["test"].start
+    execution_events = events.iloc[:val_end].copy()
+
+    period_end = float(execution_events["time"].iloc[-1])
+    max_latency = max(LATENCY_SCENARIOS)
+
+    # Shared boundaries for every latency scenario.
+    # Move slightly earlier to avoid floating-point boundary overshoots.
+    exit_send_deadline = float(np.nextafter(period_end - max_latency, -np.inf))
+    entry_cutoff_time = float(np.nextafter(exit_send_deadline - max_latency, -np.inf))
+
+    print("\nValidation — latency comparison")
+    print(f"Period end: {period_end:.9f} seconds")
+    print(f"Entry cutoff: {entry_cutoff_time:.9f} seconds")
+    print(f"Exit submission deadline: {exit_send_deadline:.9f} seconds")
+
+    latency_results = []
+
+    for latency in LATENCY_SCENARIOS:
+        scenario_trades, scenario_orders = run_backtest_with_latency(
+            events=execution_events,
+            scores=validation_scores,
+            horizon=HORIZON,
+            threshold=SIGNAL_THRESHOLD,
+            quantity=TRADE_QUANTITY,
+            fee_per_share=FEE_PER_SHARE,
+            latency_seconds=latency,
+            entry_cutoff_time=entry_cutoff_time,
+            exit_send_deadline=exit_send_deadline,
+        )
+
+        # Verify that executed trades respect the simulation boundaries.
+        if not scenario_trades.empty:
+            assert scenario_trades["exit_time"].le(period_end).all()
+            assert scenario_trades["exit_index"].lt(val_end).all()
+            assert scenario_trades["decision_time"].lt(entry_cutoff_time).all()
+
+        decomposition = decompose_trade_pnl(
+            execution_events,
+            scenario_trades,
+        )
+
+        latency_results.append(
+            {
+                "latency_ms": latency * 1_000,
+                "submitted": len(scenario_orders),
+                "rejected": int(scenario_orders["status"].eq("entry_rejected").sum()),
+                "trades": len(scenario_trades),
+                "forced_exits": int(scenario_trades["forced_exit"].sum()),
+                "mid_pnl": decomposition["mid_pnl"].sum(),
+                "spread_cost": decomposition["spread_cost"].sum(),
+                "fees": scenario_trades["fees"].sum(),
+                "net_pnl": scenario_trades["net_pnl"].sum(),
+                "mean_net_pnl": scenario_trades["net_pnl"].mean(),
+                "win_fraction": (
+                    scenario_trades["net_pnl"].gt(0).mean()
+                    if not scenario_trades.empty
+                    else np.nan
+                ),
+            }
+        )
+
+    latency_summary = pd.DataFrame(latency_results).set_index("latency_ms")
+
+    print(latency_summary.round(4).to_string())
 
 
 if __name__ == "__main__":

@@ -110,3 +110,81 @@ def get_aggressive_execution_price(
         return None
 
     return float(event_execution[price_column] / 10_000)
+
+
+def compute_execution_times(
+    decision_time: float,
+    expiry_time: float,
+    latency_seconds: float,
+    exit_send_deadline: float | None = None,
+) -> dict[str, float]:
+    """Compute arrival times, optionally enforcing a latest exit submission."""
+
+    for name, value in (
+        ("decision_time", decision_time),
+        ("expiry_time", expiry_time),
+        ("latency_seconds", latency_seconds),
+    ):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError(f"{name} must be a real number")
+
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+
+    decision_time = float(decision_time)
+    expiry_time = float(expiry_time)
+    latency_seconds = float(latency_seconds)
+
+    if decision_time < 0 or expiry_time < 0:
+        raise ValueError("timestamps must be non-negative")
+
+    if latency_seconds < 0:
+        raise ValueError("latency_seconds must be non-negative")
+
+    if expiry_time < decision_time:
+        raise ValueError("expiry_time must not precede decision_time")
+
+    if exit_send_deadline is not None:
+        if isinstance(exit_send_deadline, (bool, np.bool_)) or not isinstance(
+            exit_send_deadline, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError("exit_send_deadline must be a real number")
+
+        if not np.isfinite(exit_send_deadline):
+            raise ValueError("exit_send_deadline must be finite")
+
+        exit_send_deadline = float(exit_send_deadline)
+
+        if exit_send_deadline < decision_time:
+            raise ValueError("exit_send_deadline must not precede decision_time")
+
+    entry_arrival_time = decision_time + latency_seconds
+
+    if not np.isfinite(entry_arrival_time):
+        raise ValueError("entry arrival time must be finite")
+
+    if exit_send_deadline is None:
+        exit_send_time = max(expiry_time, entry_arrival_time)
+    else:
+        if entry_arrival_time > exit_send_deadline:
+            raise ValueError(
+                "entry arrives after the latest allowed exit submission time"
+            )
+
+        exit_send_time = max(
+            entry_arrival_time,
+            min(expiry_time, exit_send_deadline),
+        )
+
+    exit_arrival_time = exit_send_time + latency_seconds
+
+    if not np.isfinite(exit_arrival_time):
+        raise ValueError("exit arrival time must be finite")
+
+    return {
+        "entry_arrival_time": entry_arrival_time,
+        "exit_send_time": exit_send_time,
+        "exit_arrival_time": exit_arrival_time,
+    }

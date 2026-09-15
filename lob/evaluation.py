@@ -206,6 +206,8 @@ def decompose_trade_pnl(
         "quantity",
         "fees",
         "net_pnl",
+        "entry_time",
+        "exit_time",
     ]
 
     for column in required_event_cols:
@@ -232,8 +234,17 @@ def decompose_trade_pnl(
     entry_indices = result["entry_index"].to_numpy(dtype=int)
     exit_indices = result["exit_index"].to_numpy(dtype=int)
 
-    if np.any(exit_indices <= entry_indices):
-        raise ValueError("exits must occur after entries")
+    if np.any(exit_indices < entry_indices):
+        raise ValueError("exit book positions must not precede entry book positions")
+
+    entry_times = result["entry_time"].to_numpy(dtype=float, na_value=np.nan)
+    exit_times = result["exit_time"].to_numpy(dtype=float, na_value=np.nan)
+
+    if not np.isfinite(entry_times).all() or not np.isfinite(exit_times).all():
+        raise ValueError("execution timestamps must be finite")
+
+    if np.any(exit_times < entry_times):
+        raise ValueError("exit timestamps must not precede entry timestamps")
 
     # NumPy arrays preserve transaction order without pandas index alignment.
     entry_quotes = events.iloc[entry_indices]
