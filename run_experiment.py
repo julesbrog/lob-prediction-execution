@@ -1,20 +1,26 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    log_loss,
-)
 
-from lob.data import align_events, load_messages, load_orderbook, validate_book
-from lob.evaluation import analyze_score_bins
+from lob.data import (
+    align_events,
+    load_messages,
+    load_orderbook,
+    validate_book,
+)
+from lob.evaluation import (
+    analyze_aggressive_execution,
+    analyze_score_bins,
+    evaluate_model,
+    print_classification_diagnostics,
+)
 from lob.features import (
     build_basic_features,
     compute_depth_imbalance,
+    compute_event_ofi,
     compute_rolling_features,
+    compute_rolling_ofi,
 )
 from lob.labels import make_targets
 from lob.models import fit_baseline, fit_logistic
@@ -35,8 +41,6 @@ DEPTHS = (5, 10)
 TRAIN_FRACTION = 0.6
 VAL_FRACTION = 0.2
 
-CLASSES = [-1, 0, 1]
-
 FEATURE_COLUMNS = [
     "spread",
     "imbalance_1",
@@ -49,68 +53,11 @@ FEATURE_COLUMNS = [
     ],
 ]
 
-
-def evaluate_model(model, X: pd.DataFrame, y: pd.Series) -> dict[str, float]:
-    """Evaluate a fitted classifier on one dataset."""
-    predictions = model.predict(X)
-    probabilities = model.predict_proba(X)
-
-    return {
-        "log_loss": log_loss(
-            y,
-            probabilities,
-            labels=model.classes_,
-        ),
-        "accuracy": accuracy_score(y, predictions),
-        "macro_f1": f1_score(
-            y,
-            predictions,
-            labels=CLASSES,
-            average="macro",
-            zero_division=0,
-        ),
-    }
-
-
-def print_classification_diagnostics(
-    model,
-    X: pd.DataFrame,
-    y: pd.Series,
-) -> None:
-    """Print per-class metrics and a row-normalized confusion matrix."""
-    predictions = model.predict(X)
-
-    print("\nFull logistic regression — validation diagnostics:")
-    print(
-        classification_report(
-            y,
-            predictions,
-            labels=CLASSES,
-            target_names=["down", "flat", "up"],
-            digits=4,
-            zero_division=0,
-        )
-    )
-
-    matrix = confusion_matrix(
-        y,
-        predictions,
-        labels=CLASSES,
-        normalize="true",
-    )
-
-    print("Confusion matrix — proportions within each actual class:")
-    print(
-        pd.DataFrame(
-            matrix,
-            index=["actual_down", "actual_flat", "actual_up"],
-            columns=["pred_down", "pred_flat", "pred_up"],
-        ).round(3)
-    )
+OFI_FEATURE_COLUMNS = FEATURE_COLUMNS + [f"ofi_{window}" for window in WINDOWS]
 
 
 def main() -> None:
-    # 1. Load and align the original event sequence.
+    # 1. Load and align events.
     messages = load_messages(DATA_DIR / f"{FILE_PREFIX}_message_{N_LEVELS}.csv")
     book = load_orderbook(
         DATA_DIR / f"{FILE_PREFIX}_orderbook_{N_LEVELS}.csv",
@@ -121,18 +68,16 @@ def main() -> None:
     print(f"Dataset: {FILE_PREFIX}")
     print(f"Events: {len(events):,} | Book levels: {N_LEVELS}")
 
-    # 2. Check the book before computing features.
+    # 2. Validate the book.
     checks = validate_book(book, n_levels=N_LEVELS)
 
     print("\nOrder book checks:")
     print(checks.sum().to_string())
 
-    # This first experiment assumes complete, valid book snapshots.
-    # Stop for inspection rather than silently removing events.
     if checks.any().any():
         raise ValueError("Order book flags detected; inspect before proceeding")
 
-    # 3. Build features without dropping any events.
+    # 3. Build the original features.
     features = build_basic_features(events)
 
     for depth in DEPTHS:
@@ -147,7 +92,22 @@ def main() -> None:
     )
     features = features.join(historical)
 
-    # 4. Build targets from the original integer quote prices.
+    # 4. Build OFI features on the complete event sequence.
+    event_ofi = compute_event_ofi(events)
+    rolling_ofi = compute_rolling_ofi(
+        event_ofi,
+        windows=WINDOWS,
+    )
+
+    if not rolling_ofi.index.equals(features.index):
+        raise ValueError("OFI and other features must have the same index")
+
+    features = features.join(rolling_ofi)
+
+    print("\nRolling OFI — missing values:")
+    print(rolling_ofi.isna().sum().to_string())
+
+    # 5. Build targets from raw integer quote prices.
     label_mid = (events["bid_price_1"] + events["ask_price_1"]) / 20_000
 
     targets = make_targets(
@@ -156,7 +116,7 @@ def main() -> None:
         epsilon=EPSILON,
     )
 
-    # 5. Split the complete timeline, then remove unusable rows per split.
+    # 6. Create common temporal boundaries.
     splits = make_temporal_splits(
         n_events=len(events),
         horizon=HORIZON,
@@ -164,6 +124,7 @@ def main() -> None:
         val_fraction=VAL_FRACTION,
     )
 
+    # Prepare both feature sets using the same boundaries.
     datasets = prepare_datasets(
         features=features,
         targets=targets,
@@ -171,15 +132,53 @@ def main() -> None:
         feature_columns=FEATURE_COLUMNS,
     )
 
+    datasets_ofi = prepare_datasets(
+        features=features,
+        targets=targets,
+        splits=splits,
+        feature_columns=OFI_FEATURE_COLUMNS,
+    )
+
+    # Verify that comparisons use identical observations and labels.
+    for name in splits:
+        X_reference, y_reference = datasets[name]
+        X_with_ofi, y_with_ofi = datasets_ofi[name]
+
+        if not X_reference.index.equals(X_with_ofi.index):
+            raise ValueError(
+                f"{name}: reference and OFI datasets have different events"
+            )
+
+        if not y_reference.equals(y_with_ofi):
+            raise ValueError(
+                f"{name}: reference and OFI datasets have different labels"
+            )
+
+        np.testing.assert_allclose(
+            X_reference.to_numpy(),
+            X_with_ofi[FEATURE_COLUMNS].to_numpy(),
+        )
+
     print(f"\nHorizon: {HORIZON} events | Epsilon: ${EPSILON:g}")
     print("Prepared datasets:")
-    for name, (X, y) in datasets.items():
-        print(f"  {name}: {len(y):,} observations, {X.shape[1]} features")
+
+    for name in splits:
+        X_reference, y_reference = datasets[name]
+        X_with_ofi, _ = datasets_ofi[name]
+
+        print(
+            f"  {name}: {len(y_reference):,} observations | "
+            f"reference: {X_reference.shape[1]} features | "
+            f"with OFI: {X_with_ofi.shape[1]} features"
+        )
 
     X_train, y_train = datasets["train"]
     X_validation, y_validation = datasets["validation"]
 
-    # 6. Fit models using training data only.
+    X_train_ofi, y_train_ofi = datasets_ofi["train"]
+    X_validation_ofi, y_validation_ofi = datasets_ofi["validation"]
+
+    # 7. Fit all models using training data only.
     baseline = fit_baseline(X_train, y_train)
 
     logistic_simple = fit_logistic(
@@ -189,17 +188,35 @@ def main() -> None:
 
     logistic_full = fit_logistic(X_train, y_train)
 
-    # 7. Compare models on validation. The test set remains untouched.
+    logistic_ofi = fit_logistic(X_train_ofi, y_train_ofi)
+
+    # 8. Compare all four models on validation.
     experiments = [
-        ("baseline", baseline, X_validation),
-        ("logistic_simple", logistic_simple, X_validation[["imbalance_1"]]),
-        ("logistic_full", logistic_full, X_validation),
+        ("baseline", baseline, X_validation, y_validation),
+        (
+            "logistic_simple",
+            logistic_simple,
+            X_validation[["imbalance_1"]],
+            y_validation,
+        ),
+        (
+            "logistic_full",
+            logistic_full,
+            X_validation,
+            y_validation,
+        ),
+        (
+            "logistic_ofi",
+            logistic_ofi,
+            X_validation_ofi,
+            y_validation_ofi,
+        ),
     ]
 
     results = pd.DataFrame.from_dict(
         {
-            name: evaluate_model(model, X_val, y_validation)
-            for name, model, X_val in experiments
+            name: evaluate_model(model, X_val, y_val)
+            for name, model, X_val, y_val in experiments
         },
         orient="index",
     )
@@ -208,58 +225,34 @@ def main() -> None:
     print("\nValidation results:")
     print(results.round(6).to_string())
 
+    # 9. Keep detailed diagnostics on the original 11-feature model.
+    print("\nOFI model (14 features) — validation:")
     print_classification_diagnostics(
-        logistic_full,
-        X_validation,
-        y_validation,
+        logistic_ofi,
+        X_validation_ofi,
+        y_validation_ofi,
     )
+
     score_summary = analyze_score_bins(
-        logistic_full,
-        X_validation,
-        targets,
+        model=logistic_ofi,
+        X=X_validation_ofi,
+        targets=targets,
     )
 
-    print("\nValidation — future changes by score bin:")
+    print("\nOFI model — future changes by score bin:")
     print(score_summary.round(4).to_string())
-    # Compute future quotes BEFORE selecting validation observations.
-    quotes = pd.DataFrame(index=events.index)
 
-    quotes["bid"] = events["bid_price_1"] / 10_000
-    quotes["ask"] = events["ask_price_1"] / 10_000
-    quotes["future_bid"] = quotes["bid"].shift(-HORIZON)
-    quotes["future_ask"] = quotes["ask"].shift(-HORIZON)
-
-    quotes = quotes.loc[X_validation.index].copy()
-
-    probabilities = logistic_full.predict_proba(X_validation)
-    classes = list(logistic_full.classes_)
-
-    quotes["score"] = (
-        probabilities[:, classes.index(1)] - probabilities[:, classes.index(-1)]
+    execution_summary = analyze_aggressive_execution(
+        model=logistic_ofi,
+        X=X_validation_ofi,
+        events=events,
+        horizon=HORIZON,
     )
 
-    quotes["score_bin"] = pd.qcut(
-        quotes["score"],
-        q=10,
-        labels=False,
-        duplicates="drop",
-    )
-
-    quotes["spread"] = quotes["ask"] - quotes["bid"]
-
-    # Hypothetical round-trip PnL per share, before explicit fees.
-    quotes["long_pnl"] = quotes["future_bid"] - quotes["ask"]
-    quotes["short_pnl"] = quotes["bid"] - quotes["future_ask"]
-
-    execution_summary = quotes.groupby("score_bin").agg(
-        count=("score", "size"),
-        mean_spread=("spread", "mean"),
-        mean_long_pnl=("long_pnl", "mean"),
-        mean_short_pnl=("short_pnl", "mean"),
-    )
-
-    print("\nValidation — immediate execution diagnostic ($ per share):")
+    print("\nOFI model — immediate execution diagnostic ($ per share):")
     print(execution_summary.round(4).to_string())
+
+    # The test sets are prepared but are not used for model evaluation.
 
 
 if __name__ == "__main__":

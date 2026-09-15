@@ -216,3 +216,91 @@ def compute_rolling_features(
         features[f"realized_vol_{window}"] = np.sqrt(squared_returns_sum)
 
     return features
+
+
+def compute_event_ofi(events: pd.DataFrame) -> pd.Series:
+    """Compute event-level OFI from validated quotes for one session."""
+
+    required_cols = [
+        "bid_price_1",
+        "ask_price_1",
+        "bid_size_1",
+        "ask_size_1",
+    ]
+
+    missing_cols = [col for col in required_cols if col not in events.columns]
+    if missing_cols:
+        raise ValueError(f"missing columns: {missing_cols}")
+
+    bid = events["bid_price_1"]
+    ask = events["ask_price_1"]
+    bid_size = events["bid_size_1"].astype(float)
+    ask_size = events["ask_size_1"].astype(float)
+
+    previous_bid = bid.shift(1)
+    previous_ask = ask.shift(1)
+    previous_bid_size = bid_size.shift(1)
+    previous_ask_size = ask_size.shift(1)
+
+    bid_contribution = pd.Series(np.nan, index=events.index, dtype=float)
+    ask_contribution = pd.Series(np.nan, index=events.index, dtype=float)
+
+    # Bid contribution.
+    mask = bid > previous_bid
+    bid_contribution.loc[mask] = bid_size.loc[mask]
+
+    mask = bid == previous_bid
+    bid_contribution.loc[mask] = bid_size.loc[mask] - previous_bid_size.loc[mask]
+
+    mask = bid < previous_bid
+    bid_contribution.loc[mask] = -previous_bid_size.loc[mask]
+
+    # Ask contribution.
+    mask = ask < previous_ask
+    ask_contribution.loc[mask] = -ask_size.loc[mask]
+
+    mask = ask == previous_ask
+    ask_contribution.loc[mask] = previous_ask_size.loc[mask] - ask_size.loc[mask]
+
+    mask = ask > previous_ask
+    ask_contribution.loc[mask] = previous_ask_size.loc[mask]
+
+    return (bid_contribution + ask_contribution).rename("event_ofi")
+
+
+def compute_rolling_ofi(
+    event_ofi: pd.Series,
+    windows: tuple[int, ...] = (10, 50, 100),
+) -> pd.DataFrame:
+    """Sum past event-level OFI contributions over each window."""
+
+    if not isinstance(event_ofi, pd.Series):
+        raise ValueError("event_ofi must be a pandas Series")
+
+    values = event_ofi.to_numpy(dtype=float, na_value=np.nan)
+
+    # Only the first observation may be missing.
+    if np.isinf(values).any():
+        raise ValueError("event_ofi must not contain infinite values")
+
+    if np.isnan(values[1:]).any():
+        raise ValueError("only the first event_ofi value may be missing")
+
+    for window in windows:
+        if isinstance(window, bool) or not isinstance(window, int):
+            raise ValueError("windows must contain integers")
+
+        if window <= 0:
+            raise ValueError("windows must be strictly positive")
+
+    if len(set(windows)) != len(windows):
+        raise ValueError("windows must not contain duplicates")
+
+    features = pd.DataFrame(index=event_ofi.index)
+
+    for window in windows:
+        features[f"ofi_{window}"] = event_ofi.rolling(
+            window=window, min_periods=window
+        ).sum()
+
+    return features
