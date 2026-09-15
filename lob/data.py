@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 
@@ -119,3 +120,34 @@ def validate_book(book: pd.DataFrame, n_levels: int = 10) -> pd.DataFrame:
     checks["is_crossed"] = valid_best_ask & valid_best_bid & best_bid.gt(best_ask)
 
     return checks.fillna(False).astype(bool)
+
+
+def compute_horizon_duration(
+    events: pd.DataFrame,
+    horizon: int = 50,
+) -> pd.Series:
+    """Compute the duration in seconds of an event horizon within one session."""
+
+    if isinstance(horizon, bool) or not isinstance(horizon, int):
+        raise ValueError("horizon must be an integer")
+
+    if horizon <= 0:
+        raise ValueError("horizon must be strictly positive")
+
+    if not events.columns.is_unique:
+        raise ValueError("events must have unique column names")
+
+    if "time" not in events.columns:
+        raise ValueError("events must contain a 'time' column")
+
+    time = events["time"]
+
+    if not np.all(np.isfinite(time.to_numpy(dtype=float, na_value=np.nan))):
+        raise ValueError("timestamps must be finite")
+
+    if not time.is_monotonic_increasing:
+        raise ValueError("timestamps must be monotonically increasing")
+
+    duration = time.shift(-horizon) - time
+
+    return duration.rename("horizon_seconds")
