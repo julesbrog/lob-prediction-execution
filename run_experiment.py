@@ -23,7 +23,7 @@ from lob.features import (
     compute_rolling_ofi,
 )
 from lob.labels import make_targets
-from lob.models import fit_baseline, fit_logistic
+from lob.models import fit_baseline, fit_boosting, fit_logistic
 from lob.splits import make_temporal_splits, prepare_datasets
 
 # Experiment configuration
@@ -190,6 +190,8 @@ def main() -> None:
 
     logistic_ofi = fit_logistic(X_train_ofi, y_train_ofi)
 
+    boosting_ofi = fit_boosting(X_train_ofi, y_train_ofi)
+
     # 8. Compare all four models on validation.
     experiments = [
         ("baseline", baseline, X_validation, y_validation),
@@ -211,6 +213,12 @@ def main() -> None:
             X_validation_ofi,
             y_validation_ofi,
         ),
+        (
+            "boosting_ofi",
+            boosting_ofi,
+            X_validation_ofi,
+            y_validation_ofi,
+        ),
     ]
 
     results = pd.DataFrame.from_dict(
@@ -226,30 +234,30 @@ def main() -> None:
     print(results.round(6).to_string())
 
     # 9. Keep detailed diagnostics on the original 11-feature model.
-    print("\nOFI model (14 features) — validation:")
+    print("\nGradientBoosting model (14 features) — validation:")
     print_classification_diagnostics(
-        logistic_ofi,
+        boosting_ofi,
         X_validation_ofi,
         y_validation_ofi,
     )
 
     score_summary = analyze_score_bins(
-        model=logistic_ofi,
+        model=boosting_ofi,
         X=X_validation_ofi,
         targets=targets,
     )
 
-    print("\nOFI model — future changes by score bin:")
+    print("\nGradientBoosting model — future changes by score bin:")
     print(score_summary.round(4).to_string())
 
     execution_summary = analyze_aggressive_execution(
-        model=logistic_ofi,
+        model=boosting_ofi,
         X=X_validation_ofi,
         events=events,
         horizon=HORIZON,
     )
 
-    print("\nOFI model — immediate execution diagnostic ($ per share):")
+    print("\nGradientBoosting model — immediate execution diagnostic ($ per share):")
     print(execution_summary.round(4).to_string())
 
     # The test sets are prepared but are not used for model evaluation.
