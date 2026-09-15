@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -173,3 +174,127 @@ def analyze_aggressive_execution(
         mean_long_pnl=("long_pnl", "mean"),
         mean_short_pnl=("short_pnl", "mean"),
     )
+
+
+def decompose_trade_pnl(
+    events: pd.DataFrame,
+    trades: pd.DataFrame,
+) -> pd.DataFrame:
+    """Decompose top-of-book round-trip PnL into mid movement and costs."""
+
+    result = trades.copy()
+
+    new_columns = [
+        "mid_pnl",
+        "spread_cost",
+        "reconstructed_net_pnl",
+    ]
+
+    if result.empty:
+        for column in new_columns:
+            result[column] = pd.Series(index=result.index, dtype=float)
+        return result
+
+    if not events.columns.is_unique or not trades.columns.is_unique:
+        raise ValueError("column names must be unique")
+
+    required_event_cols = ["bid_price_1", "ask_price_1"]
+    required_trade_cols = [
+        "entry_index",
+        "exit_index",
+        "side",
+        "quantity",
+        "fees",
+        "net_pnl",
+    ]
+
+    for column in required_event_cols:
+        if column not in events.columns:
+            raise ValueError(f"missing event column: {column}")
+
+    for column in required_trade_cols:
+        if column not in trades.columns:
+            raise ValueError(f"missing trade column: {column}")
+
+    for column in ("entry_index", "exit_index"):
+        indices = result[column]
+
+        if (
+            not pd.api.types.is_integer_dtype(indices.dtype)
+            or pd.api.types.is_bool_dtype(indices.dtype)
+            or indices.isna().any()
+        ):
+            raise ValueError(f"{column} must contain integer positions")
+
+        if ((indices < 0) | (indices >= len(events))).any():
+            raise ValueError(f"{column} is outside the available history")
+
+    entry_indices = result["entry_index"].to_numpy(dtype=int)
+    exit_indices = result["exit_index"].to_numpy(dtype=int)
+
+    if np.any(exit_indices <= entry_indices):
+        raise ValueError("exits must occur after entries")
+
+    # NumPy arrays preserve transaction order without pandas index alignment.
+    entry_quotes = events.iloc[entry_indices]
+    exit_quotes = events.iloc[exit_indices]
+
+    entry_bid = entry_quotes["bid_price_1"].to_numpy(dtype=float)
+    entry_ask = entry_quotes["ask_price_1"].to_numpy(dtype=float)
+    exit_bid = exit_quotes["bid_price_1"].to_numpy(dtype=float)
+    exit_ask = exit_quotes["ask_price_1"].to_numpy(dtype=float)
+
+    for bid, ask in ((entry_bid, entry_ask), (exit_bid, exit_ask)):
+        if not np.isfinite(bid).all() or not np.isfinite(ask).all():
+            raise ValueError("quote prices must be finite")
+
+        if (
+            np.any(bid <= 0)
+            or np.any(ask <= 0)
+            or np.any(ask == 9999999999)
+            or np.any(ask < bid)
+        ):
+            raise ValueError("invalid best quotes")
+
+    side = result["side"].to_numpy(dtype=float)
+    quantity = result["quantity"].to_numpy(dtype=float)
+    fees = result["fees"].to_numpy(dtype=float)
+    net_pnl = result["net_pnl"].to_numpy(dtype=float)
+
+    if not np.isin(side, [-1, 1]).all():
+        raise ValueError("side must be -1 or 1")
+
+    if (
+        not np.isfinite(quantity).all()
+        or np.any(quantity <= 0)
+        or np.any(quantity != np.floor(quantity))
+    ):
+        raise ValueError("quantities must be positive integers")
+
+    if not np.isfinite(fees).all() or np.any(fees < 0):
+        raise ValueError("fees must be finite and non-negative")
+
+    if not np.isfinite(net_pnl).all():
+        raise ValueError("net_pnl must be finite")
+
+    # Convert raw LOBSTER quote prices into dollars.
+    entry_mid = (entry_bid + entry_ask) / 20_000
+    exit_mid = (exit_bid + exit_ask) / 20_000
+
+    entry_spread = (entry_ask - entry_bid) / 10_000
+    exit_spread = (exit_ask - exit_bid) / 10_000
+
+    result["mid_pnl"] = side * quantity * (exit_mid - entry_mid)
+    result["spread_cost"] = quantity * (entry_spread + exit_spread) / 2
+
+    result["reconstructed_net_pnl"] = result["mid_pnl"] - result["spread_cost"] - fees
+
+    np.testing.assert_allclose(
+        result["reconstructed_net_pnl"].to_numpy(),
+        net_pnl,
+        rtol=1e-9,
+        atol=1e-9,
+        err_msg="PnL decomposition does not match recorded net PnL",
+    )
+
+    return result

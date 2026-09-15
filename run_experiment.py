@@ -3,8 +3,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from lob.backtest import run_backtest
 from lob.data import (
     align_events,
+    compute_horizon_duration,
     load_messages,
     load_orderbook,
     validate_book,
@@ -12,6 +14,7 @@ from lob.data import (
 from lob.evaluation import (
     analyze_aggressive_execution,
     analyze_score_bins,
+    decompose_trade_pnl,
     evaluate_model,
     print_classification_diagnostics,
 )
@@ -54,6 +57,10 @@ FEATURE_COLUMNS = [
 ]
 
 OFI_FEATURE_COLUMNS = FEATURE_COLUMNS + [f"ofi_{window}" for window in WINDOWS]
+
+SIGNAL_THRESHOLD = 0.3
+TRADE_QUANTITY = 1
+FEE_PER_SHARE = 0.0
 
 
 def main() -> None:
@@ -172,6 +179,20 @@ def main() -> None:
             f"with OFI: {X_with_ofi.shape[1]} features"
         )
 
+    horizon_seconds = compute_horizon_duration(
+        events,
+        horizon=HORIZON,
+    )
+
+    for name in ("train", "validation"):
+        X, _ = datasets[name]
+        durations = horizon_seconds.loc[X.index]
+
+        print(f"\n{name} — duration of {HORIZON} events, in seconds:")
+        print(
+            durations.describe(percentiles=[0.01, 0.10, 0.50, 0.90, 0.99]).to_string()
+        )
+
     X_train, y_train = datasets["train"]
     X_validation, y_validation = datasets["validation"]
 
@@ -261,6 +282,54 @@ def main() -> None:
     print(execution_summary.round(4).to_string())
 
     # The test sets are prepared but are not used for model evaluation.
+    # Build prediction scores while preserving original event indices.
+    probabilities = boosting_ofi.predict_proba(X_validation_ofi)
+    classes = list(boosting_ofi.classes_)
+
+    validation_scores = pd.Series(
+        probabilities[:, classes.index(1)] - probabilities[:, classes.index(-1)],
+        index=X_validation_ofi.index,
+        name="score",
+    )
+
+    # Simulate non-overlapping round trips on validation.
+    trades = run_backtest(
+        events=events,
+        scores=validation_scores,
+        horizon=HORIZON,
+        threshold=SIGNAL_THRESHOLD,
+        quantity=TRADE_QUANTITY,
+        fee_per_share=FEE_PER_SHARE,
+    )
+
+    print("\nBoosting + OFI — validation backtest")
+    print("Zero latency; fees per share per transaction:", FEE_PER_SHARE)
+    print("Number of trades:", len(trades))
+
+    if trades.empty:
+        print("No trades executed.")
+    else:
+        print(trades.head().to_string(index=False))
+
+        print("\nTotal gross PnL ($):", trades["gross_pnl"].sum())
+        print("Total fees ($):", trades["fees"].sum())
+        print("Total net PnL ($):", trades["net_pnl"].sum())
+        print("Mean net PnL per trade ($):", trades["net_pnl"].mean())
+        print("Winning trade fraction:", trades["net_pnl"].gt(0).mean())
+
+        print("\nNet PnL by position side (-1: short, +1: long):")
+        print(
+            trades.groupby("side")["net_pnl"].agg(["count", "sum", "mean"]).to_string()
+        )
+    decomposed_trades = decompose_trade_pnl(events, trades)
+
+    print("\nValidation — PnL decomposition ($):")
+    print(
+        decomposed_trades[["mid_pnl", "spread_cost", "fees", "reconstructed_net_pnl"]]
+        .sum()
+        .round(4)
+        .to_string()
+    )
 
 
 if __name__ == "__main__":
