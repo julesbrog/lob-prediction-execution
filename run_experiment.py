@@ -40,7 +40,7 @@ FILE_PREFIX = "AAPL_2012-06-21_34200000_57600000"
 N_LEVELS = 10
 
 HORIZON = 50
-EPSILON = 0.0
+EPSILON_UNITS = 0.0  # 200 units correspond to $0.01.
 WINDOWS = (10, 50, 100)
 DEPTHS = (5, 10)
 
@@ -120,12 +120,12 @@ def main() -> None:
     print(rolling_ofi.isna().sum().to_string())
 
     # 5. Build targets from raw integer quote prices.
-    label_mid = (events["bid_price_1"] + events["ask_price_1"]) / 20_000
 
     targets = make_targets(
-        label_mid,
+        bid_raw=events["bid_price_1"],
+        ask_raw=events["ask_price_1"],
         horizon=HORIZON,
-        epsilon=EPSILON,
+        epsilon_units=EPSILON_UNITS,
     )
 
     # 6. Create common temporal boundaries.
@@ -171,7 +171,7 @@ def main() -> None:
             X_with_ofi[FEATURE_COLUMNS].to_numpy(),
         )
 
-    print(f"\nHorizon: {HORIZON} events | Epsilon: ${EPSILON:g}")
+    print(f"\nHorizon: {HORIZON} events | Epsilon: ${EPSILON_UNITS / 20_000:g}")
     print("Prepared datasets:")
 
     for name in splits:
