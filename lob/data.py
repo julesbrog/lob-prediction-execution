@@ -67,7 +67,7 @@ def align_events(messages: pd.DataFrame, book: pd.DataFrame) -> pd.DataFrame:
 
 
 def validate_book(book: pd.DataFrame, n_levels: int = 10) -> pd.DataFrame:
-    """Flag order book anomalies without modifying or removing rows."""
+    """Flag anomalies without modifying or removing order book rows."""
 
     if isinstance(n_levels, bool) or not isinstance(n_levels, int):
         raise ValueError("n_levels must be an integer")
@@ -75,51 +75,88 @@ def validate_book(book: pd.DataFrame, n_levels: int = 10) -> pd.DataFrame:
     if n_levels <= 0:
         raise ValueError("n_levels must be strictly positive")
 
-    ask_sentinel = 9999999999
-    bid_sentinel = -9999999999
-
-    ask_price_cols = [f"ask_price_{level}" for level in range(1, n_levels + 1)]
-    bid_price_cols = [f"bid_price_{level}" for level in range(1, n_levels + 1)]
-    size_cols = [
-        f"{side}_size_{level}"
-        for level in range(1, n_levels + 1)
-        for side in ("ask", "bid")
-    ]
-
-    required_cols = ask_price_cols + bid_price_cols + size_cols
-
     if not book.columns.is_unique:
         raise ValueError("book must have unique column names")
 
-    missing_cols = [column for column in required_cols if column not in book.columns]
+    ask_cols = [f"ask_price_{level}" for level in range(1, n_levels + 1)]
+    bid_cols = [f"bid_price_{level}" for level in range(1, n_levels + 1)]
+    ask_size_cols = [f"ask_size_{level}" for level in range(1, n_levels + 1)]
+    bid_size_cols = [f"bid_size_{level}" for level in range(1, n_levels + 1)]
+
+    required_cols = ask_cols + bid_cols + ask_size_cols + bid_size_cols
+
+    missing_cols = [col for col in required_cols if col not in book.columns]
     if missing_cols:
         raise ValueError(f"missing columns: {missing_cols}")
 
-    ask_prices = book[ask_price_cols]
-    bid_prices = book[bid_price_cols]
-    sizes = book[size_cols]
+    for col in required_cols:
+        if (
+            not pd.api.types.is_numeric_dtype(book[col])
+            or pd.api.types.is_bool_dtype(book[col])
+            or pd.api.types.is_complex_dtype(book[col])
+        ):
+            raise ValueError(f"{col} must contain real numeric values")
 
-    empty_asks = ask_prices.eq(ask_sentinel)
-    empty_bids = bid_prices.eq(bid_sentinel)
+    ask = book[ask_cols].to_numpy(dtype=float, na_value=np.nan)
+    bid = book[bid_cols].to_numpy(dtype=float, na_value=np.nan)
+    ask_size = book[ask_size_cols].to_numpy(dtype=float, na_value=np.nan)
+    bid_size = book[bid_size_cols].to_numpy(dtype=float, na_value=np.nan)
 
-    invalid_asks = ask_prices.le(0) & ~empty_asks
-    invalid_bids = bid_prices.le(0) & ~empty_bids
+    prices = np.concatenate([ask, bid], axis=1)
+    sizes = np.concatenate([ask_size, bid_size], axis=1)
+    values = np.concatenate([prices, sizes], axis=1)
 
-    best_ask = book["ask_price_1"]
-    best_bid = book["bid_price_1"]
+    ask_sentinel = 9_999_999_999
+    bid_sentinel = -9_999_999_999
 
-    valid_best_ask = best_ask.notna() & best_ask.gt(0) & best_ask.ne(ask_sentinel)
-    valid_best_bid = best_bid.notna() & best_bid.gt(0) & best_bid.ne(bid_sentinel)
+    empty_ask = ask == ask_sentinel
+    empty_bid = bid == bid_sentinel
 
-    checks = pd.DataFrame(index=book.index)
+    valid_ask = (
+        np.isfinite(ask) & (ask > 0) & (ask != ask_sentinel) & (ask != bid_sentinel)
+    )
+    valid_bid = (
+        np.isfinite(bid) & (bid > 0) & (bid != ask_sentinel) & (bid != bid_sentinel)
+    )
 
-    checks["has_missing"] = book[required_cols].isna().any(axis=1)
-    checks["has_negative_size"] = sizes.lt(0).any(axis=1)
-    checks["has_empty_level"] = empty_asks.any(axis=1) | empty_bids.any(axis=1)
-    checks["has_invalid_price"] = invalid_asks.any(axis=1) | invalid_bids.any(axis=1)
-    checks["is_crossed"] = valid_best_ask & valid_best_bid & best_bid.gt(best_ask)
+    # Missing and infinite prices have their own flags.
+    invalid_ask = np.isfinite(ask) & ~empty_ask & ~valid_ask
+    invalid_bid = np.isfinite(bid) & ~empty_bid & ~valid_bid
 
-    return checks.fillna(False).astype(bool)
+    # Compare adjacent occupied, valid price levels.
+    ask_pairs = valid_ask[:, :-1] & valid_ask[:, 1:]
+    bid_pairs = valid_bid[:, :-1] & valid_bid[:, 1:]
+
+    unordered_ask = (ask_pairs & (ask[:, 1:] <= ask[:, :-1])).any(axis=1)
+    unordered_bid = (bid_pairs & (bid[:, 1:] >= bid[:, :-1])).any(axis=1)
+
+    # Once an empty level appears, all deeper levels must be empty.
+    ask_gap = (np.maximum.accumulate(empty_ask, axis=1) & ~empty_ask).any(axis=1)
+    bid_gap = (np.maximum.accumulate(empty_bid, axis=1) & ~empty_bid).any(axis=1)
+
+    # Sentinel prices must have zero volume.
+    bad_empty_size = (empty_ask & (ask_size != 0)).any(axis=1) | (
+        empty_bid & (bid_size != 0)
+    ).any(axis=1)
+
+    valid_best = valid_ask[:, 0] & valid_bid[:, 0]
+
+    return pd.DataFrame(
+        {
+            "has_missing": np.isnan(values).any(axis=1),
+            "has_infinite": np.isinf(values).any(axis=1),
+            "has_negative_size": (sizes < 0).any(axis=1),
+            "has_empty_level": (empty_ask.any(axis=1) | empty_bid.any(axis=1)),
+            "has_invalid_price": (invalid_ask.any(axis=1) | invalid_bid.any(axis=1)),
+            "is_crossed": valid_best & (bid[:, 0] > ask[:, 0]),
+            "has_unordered_ask": unordered_ask,
+            "has_unordered_bid": unordered_bid,
+            "has_invalid_empty_layout": ask_gap | bid_gap,
+            "has_invalid_empty_size": bad_empty_size,
+        },
+        index=book.index,
+        dtype=bool,
+    )
 
 
 def compute_horizon_duration(
