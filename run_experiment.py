@@ -218,7 +218,7 @@ def main() -> None:
 
     boosting_ofi = fit_boosting(X_train_ofi, y_train_ofi)
 
-    # 8. Compare all four models on validation.
+    # 8. Compare all five models on validation.
     experiments = [
         ("baseline", baseline, X_validation, y_validation),
         (
@@ -259,7 +259,7 @@ def main() -> None:
     print("\nValidation results:")
     print(results.round(6).to_string())
 
-    # 9. Keep detailed diagnostics on the original 11-feature model.
+    # 9. Detailed validation diagnostics for the boosting model.
     print("\nGradientBoosting model (14 features) — validation:")
     print_classification_diagnostics(
         boosting_ofi,
@@ -286,7 +286,6 @@ def main() -> None:
     print("\nGradientBoosting model — immediate execution diagnostic ($ per share):")
     print(execution_summary.round(4).to_string())
 
-    # The test sets are prepared but are not used for model evaluation.
     # Build prediction scores while preserving original event indices.
     probabilities = boosting_ofi.predict_proba(X_validation_ofi)
     classes = list(boosting_ofi.classes_)
@@ -401,6 +400,144 @@ def main() -> None:
     latency_summary = pd.DataFrame(latency_results).set_index("latency_ms")
 
     print(latency_summary.round(4).to_string())
+    # 10. Final predictive evaluation on the held-out test set.
+    # Reuse models fitted on training data only.
+    X_test, y_test = datasets["test"]
+    X_test_ofi, y_test_ofi = datasets_ofi["test"]
+
+    test_experiments = [
+        ("baseline", baseline, X_test, y_test),
+        ("logistic_ofi", logistic_ofi, X_test_ofi, y_test_ofi),
+        ("boosting_ofi", boosting_ofi, X_test_ofi, y_test_ofi),
+    ]
+
+    test_results = pd.DataFrame.from_dict(
+        {name: evaluate_model(model, X, y) for name, model, X, y in test_experiments},
+        orient="index",
+    )
+    test_results.index.name = "model"
+
+    print("\nFinal test results:")
+    print(test_results.round(6).to_string())
+
+    comparison = pd.concat(
+        {
+            "validation": results.loc[test_results.index],
+            "test": test_results,
+        },
+        names=["split"],
+    )
+
+    print("\nValidation versus test:")
+    print(comparison.round(6).to_string())
+
+    print("\nBoosting + OFI — test classification diagnostics:")
+    print_classification_diagnostics(
+        boosting_ofi,
+        X_test_ofi,
+        y_test_ofi,
+    )
+
+    # 11. Test backtest with the previously fixed strategy parameters.
+    test_probabilities = boosting_ofi.predict_proba(X_test_ofi)
+    classes = list(boosting_ofi.classes_)
+
+    test_scores = pd.Series(
+        test_probabilities[:, classes.index(1)]
+        - test_probabilities[:, classes.index(-1)],
+        index=X_test_ofi.index,
+        name="score",
+    )
+
+    # The test period ends at the last available event.
+    test_period_end = float(events["time"].iloc[-1])
+    max_latency = max(LATENCY_SCENARIOS)
+
+    # Use identical boundaries across latency scenarios.
+    test_exit_deadline = float(np.nextafter(test_period_end - max_latency, -np.inf))
+    test_entry_cutoff = float(np.nextafter(test_exit_deadline - max_latency, -np.inf))
+
+    print("\nTest — latency comparison")
+    print(f"Signal threshold: {SIGNAL_THRESHOLD}")
+    print(f"Quantity: {TRADE_QUANTITY}")
+    print(f"Fees per share per transaction: {FEE_PER_SHARE}")
+    print(f"Period end: {test_period_end:.9f} seconds")
+    print(f"Entry cutoff: {test_entry_cutoff:.9f} seconds")
+    print(f"Exit submission deadline: {test_exit_deadline:.9f} seconds")
+
+    test_latency_results = []
+
+    for latency in LATENCY_SCENARIOS:
+        test_trades, test_orders = run_backtest_with_latency(
+            events=events,
+            scores=test_scores,
+            horizon=HORIZON,
+            threshold=SIGNAL_THRESHOLD,
+            quantity=TRADE_QUANTITY,
+            fee_per_share=FEE_PER_SHARE,
+            latency_seconds=latency,
+            entry_cutoff_time=test_entry_cutoff,
+            exit_send_deadline=test_exit_deadline,
+        )
+
+        if not test_orders.empty:
+            assert test_orders["decision_index"].ge(splits["test"].start).all()
+
+        if not test_trades.empty:
+            assert test_trades["exit_time"].le(test_period_end).all()
+            assert test_trades["exit_index"].lt(len(events)).all()
+            assert test_trades["decision_time"].lt(test_entry_cutoff).all()
+
+        test_decomposition = decompose_trade_pnl(
+            events,
+            test_trades,
+        )
+
+        test_latency_results.append(
+            {
+                "latency_ms": latency * 1_000,
+                "submitted": len(test_orders),
+                "rejected": int(test_orders["status"].eq("entry_rejected").sum()),
+                "trades": len(test_trades),
+                "forced_exits": int(test_trades["forced_exit"].sum()),
+                "mid_pnl": test_decomposition["mid_pnl"].sum(),
+                "spread_cost": test_decomposition["spread_cost"].sum(),
+                "fees": test_trades["fees"].sum(),
+                "net_pnl": test_trades["net_pnl"].sum(),
+                "mean_net_pnl": test_trades["net_pnl"].mean(),
+                "win_fraction": (
+                    test_trades["net_pnl"].gt(0).mean()
+                    if not test_trades.empty
+                    else np.nan
+                ),
+            }
+        )
+
+    test_latency_summary = pd.DataFrame(test_latency_results).set_index("latency_ms")
+
+    print(test_latency_summary.round(4).to_string())
+
+    execution_comparison = pd.concat(
+        {
+            "validation": latency_summary,
+            "test": test_latency_summary,
+        },
+        names=["split"],
+    )
+
+    print("\nValidation versus test — execution results:")
+    print(execution_comparison.round(4).to_string())
+    # Save the current experiment results.
+    output_dir = PROJECT_ROOT / "reports" / "baseline_v1"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    results.to_csv(output_dir / "validation_metrics.csv")
+    test_results.to_csv(output_dir / "test_metrics.csv")
+
+    latency_summary.to_csv(output_dir / "validation_latency.csv")
+    test_latency_summary.to_csv(output_dir / "test_latency.csv")
+
+    print(f"\nResults saved to: {output_dir}")
 
 
 if __name__ == "__main__":
