@@ -315,6 +315,79 @@ def plot_mlp_training(mlp_dir: Path, output_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_feature_families(features_dir: Path, output_dir: Path) -> None:
+    """Ablation by family (left) and permutation importance (right)."""
+
+    metrics = pd.read_csv(features_dir / "validation_metrics_by_feature_set.csv")
+    importance = pd.read_csv(features_dir / "permutation_importance.csv")
+
+    boosting = metrics.loc[metrics["model"].eq("boosting")].set_index("feature_set")
+    logistic = metrics.loc[metrics["model"].eq("logistic")].set_index("feature_set")
+
+    order = [
+        "reference", "reference+noise", "reference+depth", "reference+flow",
+        "reference+activity", "reference+trades", "all",
+        "all-flow", "all-activity", "all-depth", "all-ofi", "all-trades",
+    ]
+    missing = [name for name in order if name not in boosting.index]
+    if missing:
+        raise ValueError(f"Missing feature sets: {missing}")
+
+    labels = [name.replace("reference", "ref").replace("+", " + ").replace("-", " − ")
+              for name in order]
+
+    fig, (ax_left, ax_right) = plt.subplots(
+        1, 2, figsize=(9, 4.2), gridspec_kw={"width_ratios": [1, 1.15]}
+    )
+
+    y = np.arange(len(order))
+    ax_left.plot(logistic.loc[order, "log_loss"], y, "s", color=ORANGE,
+                 markersize=6, label="logistic")
+    ax_left.plot(boosting.loc[order, "log_loss"], y, "o", color=BLUE,
+                 markersize=6, label="boosting")
+    ax_left.axvline(boosting.loc["reference", "log_loss"], color=GRAY,
+                    linestyle="--", linewidth=0.8)
+    ax_left.axhline(6.5, color="#e6e5e2", linewidth=0.8)
+    ax_left.set_yticks(y)
+    ax_left.set_yticklabels(labels)
+    ax_left.invert_yaxis()
+    ax_left.set_xlabel("validation log loss")
+    ax_left.set_title("Adding a family to the reference (top),\nremoving one from the full set (bottom)",
+                      loc="left", fontsize=9)
+    ax_left.legend(frameon=False, fontsize=8, loc="lower left")
+    ax_left.grid(axis="y", visible=False)
+
+    top = importance.sort_values("log_loss_increase", ascending=False).head(15)
+    noise = float(importance.loc[importance["feature"].eq("noise"), "log_loss_increase"].iloc[0])
+    family_colors = {
+        "trades": BLUE, "ofi": AQUA, "book": GRAY, "depth": ORANGE,
+        "activity": "#4a3aa7", "flow": "#e87ba4", "noise": TEXT,
+    }
+    y2 = np.arange(len(top))
+    ax_right.barh(
+        y2, top["log_loss_increase"] * 1000,
+        xerr=top["std"] * 1000, color=[family_colors[f] for f in top["family"]],
+        height=0.7, error_kw={"linewidth": 0.8}, ecolor=TEXT,
+    )
+    ax_right.axvline(noise * 1000, color=TEXT, linestyle=":", linewidth=0.8)
+    ax_right.set_yticks(y2)
+    ax_right.set_yticklabels(top["feature"], fontsize=8)
+    ax_right.invert_yaxis()
+    ax_right.set_xlabel("increase in validation log loss when permuted (×1000)")
+    ax_right.set_title("Permutation importance, boosting on all features\n(dotted: noise control)",
+                       loc="left", fontsize=9)
+    ax_right.grid(axis="y", visible=False)
+
+    from matplotlib.patches import Patch
+    handles = [Patch(color=c, label=f) for f, c in family_colors.items()
+               if f in set(top["family"])]
+    ax_right.legend(handles=handles, frameon=False, fontsize=8, loc="lower right")
+
+    fig.tight_layout()
+    fig.savefig(output_dir / "feature_families.png")
+    plt.close(fig)
+
+
 def check_report_inputs(baseline_dir: Path, mlp_dir: Path) -> list[Path]:
     required = [
         baseline_dir / name for name in (
@@ -360,9 +433,13 @@ def main() -> None:
     parser.add_argument("--uncertainty-dir", type=Path,
                         default=REPORTS_DIR / "uncertainty_v1",
                         help="Decile intervals; skipped when the directory is missing.")
+    parser.add_argument("--features-dir", type=Path,
+                        default=REPORTS_DIR / "features_v1",
+                        help="Feature family results; skipped when missing.")
     parser.add_argument("--output-dir", type=Path, default=FIGURES_DIR)
     args = parser.parse_args()
     uncertainty_dir = args.uncertainty_dir if args.uncertainty_dir.is_dir() else None
+    features_dir = args.features_dir if args.features_dir.is_dir() else None
     try:
         inputs = check_report_inputs(args.baseline_dir, args.mlp_dir)
         if uncertainty_dir is not None:
@@ -372,6 +449,12 @@ def main() -> None:
         plot_score_bins(args.baseline_dir, args.output_dir, uncertainty_dir)
         plot_pnl_decomposition(args.baseline_dir, args.output_dir)
         plot_mlp_training(args.mlp_dir, args.output_dir)
+        if features_dir is not None:
+            inputs += [
+                features_dir / "validation_metrics_by_feature_set.csv",
+                features_dir / "permutation_importance.csv",
+            ]
+            plot_feature_families(features_dir, args.output_dir)
     except (FileNotFoundError, KeyError, ValueError) as error:
         parser.exit(1, f"Cannot build figures: {error}\n")
     provenance = {

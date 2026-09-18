@@ -74,6 +74,53 @@ The unchanged class is rare (7.6% of validation, 8.6% of test) and no model
 predicts it, so accuracy is essentially a down-versus-up number. Macro F1
 makes that weakness visible.
 
+### Feature families from the message file
+
+The 14 reference features only look at the book. `features_v1` adds four
+families built from the LOBSTER message stream and one control, evaluates
+each family added to the reference and each removed from the full set, and
+ranks every column by permutation importance on validation. All sets are
+fitted on the same rows.
+
+| Family | Columns |
+|---|---|
+| trades | signed and total executed volume over 10, 50, 100 events (visible and hidden executions; a trade that hits a sell order counts positive) |
+| flow | net limit-order flow (signed submissions minus signed cancellations) and cancelled volume over the same windows |
+| activity | log time since the previous event, event rate over 50 and 100 events |
+| depth | log quantity at the touch and over five levels, each side |
+| noise | one standard normal column, independent of the data |
+
+![Feature families](reports/figures/feature_families.png)
+
+| Boosting, validation | log loss |
+|---|---:|
+| reference (14) | 0.882 |
+| reference + trades | 0.872 |
+| reference + activity | 0.878 |
+| reference + flow | 0.880 |
+| reference + depth | 0.882 |
+| reference + noise | 0.882 |
+| all real families (33) | 0.868 |
+| all − trades | 0.878 |
+| all − ofi | 0.871 |
+| all − depth | 0.870 |
+| all − activity | 0.869 |
+| all − flow | 0.867 |
+
+Signed executed volume over the last 10 and 50 events is the strongest
+column in the whole set: permuting it costs 0.021 and 0.015 of log loss,
+against 0.008 for the spread and for OFI over 50 events. Adding the trades
+family alone gains 0.010, ten times the gap between boosting and the MLP.
+Depth adds nothing on its own but 0.002 once trades are present, a plausible
+interaction between resting size at the touch and the volume hitting it.
+Flow adds nothing, and the noise column has exactly zero importance, so the
+boosting model never split on it. The level-1, 5 and 10 imbalances come out
+at zero or slightly negative once OFI and signed volume are in, which says
+they were carrying the same information less precisely.
+
+These are validation numbers. The 33-feature model has not been evaluated on
+the test block, and will not be until a fresh session is available.
+
 ## From scores to execution
 
 The score is P(up) − P(down). Sorting validation events into score deciles
@@ -147,13 +194,14 @@ the spread twice.
 | `lob/models.py` | Model fitting, including epoch-wise MLP training |
 | `lob/evaluation.py` | Classification diagnostics, score bins, PnL decomposition |
 | `lob/execution.py`, `lob/backtest.py` | Quote execution and non-overlapping strategy simulation |
+| `lob/message_features.py` | Trade, order-flow, activity and depth features from the message file |
 | `lob/uncertainty.py` | Moving block bootstrap |
 | `make_figures.py` | Figures from saved CSVs, no training required |
 
 Input validation is deliberately strict: crossed books, non-monotonic
 timestamps, sentinel prices, insufficient exit liquidity and future columns
 used as features all raise rather than being silently handled. `pytest` runs
-111 tests over features, labels, splits, execution, latency and the bootstrap.
+120 tests over features, labels, splits, execution, latency and the bootstrap.
 
 ## Setup and data
 
@@ -184,6 +232,7 @@ in `lob/experiments.py`.
 python run_experiment.py baseline_v1      # models, diagnostics, backtests, the one test evaluation
 python run_experiment.py mlp_multiseed    # MLP on validation, 5 seeds
 python run_experiment.py uncertainty_v1   # block bootstrap intervals
+python run_experiment.py features_v1      # message-file feature families, ablations, permutation importance
 python make_figures.py                    # figures from the reference folders
 python -m pytest -q
 ```
@@ -193,8 +242,8 @@ Each run creates a new directory under `reports/runs/` (or the path given with
 configuration, input and source hashes, dependency versions and git revision,
 `dataset_summary.json`, fitted estimator parameters, per-scenario trade and
 order logs, a `status.json`, and the metric CSVs. The reference folders are
-never overwritten. `make_figures.py` accepts `--baseline-dir`, `--mlp-dir` and
-`--uncertainty-dir` to render a different run, and writes `figure_sources.json`
+never overwritten. `make_figures.py` accepts `--baseline-dir`, `--mlp-dir`, `--uncertainty-dir`
+and `--features-dir` to render a different run, and writes `figure_sources.json`
 with the hashes of the CSVs it used.
 
 ## Limitations and next steps
@@ -208,9 +257,9 @@ limit-order model has to handle queue position, cancellations ahead of the
 order, partial fills and the fact that filled orders are not a random sample
 of signals.
 
-Planned, in order: feature families from the message file (signed trade
-volume, cancellations, inter-event times, time of day) with ablations by
-family; event versus clock-time horizons and decisions after estimated costs;
+Planned, in order: check whether the 33-feature signal is large enough in
+cents to change the execution conclusion (validation only); event versus
+clock-time horizons and decisions after estimated costs;
 more sessions with a fresh reserved test block; then a passive execution
 simulator with explicit fill assumptions and an aggressive / passive / abstain
 policy.
