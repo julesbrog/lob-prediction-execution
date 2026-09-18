@@ -10,6 +10,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("experiment", choices=("baseline_v1", "mlp_multiseed", "uncertainty_v1", "features_v1", "signal_v1", "passive_v1"))
     parser.add_argument(
+        "--ticker", default="AAPL",
+        help="LOBSTER sample ticker in data/raw (AAPL, AMZN, GOOG, INTC, MSFT).",
+    )
+    parser.add_argument(
         "--output-dir", type=Path,
         help="New output directory (must not exist). Default: reports/runs/<unique ID>.",
     )
@@ -17,7 +21,10 @@ def main() -> None:
 
     from lob.experiments import ExperimentConfig, run_experiment
 
-    config = ExperimentConfig(project_root=PROJECT_ROOT)
+    config = ExperimentConfig(
+        project_root=PROJECT_ROOT,
+        file_prefix=f"{args.ticker.upper()}_2012-06-21_34200000_57600000",
+    )
     try:
         run_experiment(args.experiment, config, args.output_dir)
     except FileExistsError:

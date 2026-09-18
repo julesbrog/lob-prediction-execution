@@ -1247,8 +1247,9 @@ def run_experiment(experiment: str, config: ExperimentConfig, output_dir=None):
         raise ValueError(f"Unknown experiment: {experiment}")
     if output_dir is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ticker = config.file_prefix.split("_")[0]
         output_dir = config.project_root / "reports" / "runs" / (
-            f"{experiment}_{stamp}_{uuid.uuid4().hex[:8]}"
+            f"{experiment}_{ticker}_{stamp}_{uuid.uuid4().hex[:8]}"
         )
     output_dir = Path(output_dir).resolve()
     # This fails before loading data or fitting if the destination exists.

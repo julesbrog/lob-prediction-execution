@@ -449,6 +449,96 @@ def plot_passive_execution(passive_dir: Path, output_dir: Path) -> None:
     plt.close(fig)
 
 
+TICKER_DIRS = {
+    "AAPL": "baseline_v1", "AMZN": "baseline_AMZN", "GOOG": "baseline_GOOG",
+    "INTC": "baseline_INTC", "MSFT": "baseline_MSFT",
+}
+
+
+def summarize_tickers(reports_dir: Path) -> pd.DataFrame:
+    """One row per ticker from the saved baseline runs."""
+
+    rows = []
+    for ticker, folder in TICKER_DIRS.items():
+        directory = reports_dir / folder
+        if not directory.is_dir():
+            continue
+        validation = pd.read_csv(directory / "validation_metrics.csv").set_index("model")
+        test = pd.read_csv(directory / "test_metrics.csv").set_index("model")
+        bins = pd.read_csv(directory / "validation_score_bins.csv")
+        execution = pd.read_csv(directory / "validation_execution_bins.csv")
+        latency = pd.read_csv(directory / "test_latency.csv").set_index("latency_ms")
+        zero = latency.loc[0.0]
+        spread = float((execution["mean_spread"] * execution["count"]).sum() / execution["count"].sum())
+        top = bins.sort_values("score_bin").iloc[-1]
+        bottom = bins.sort_values("score_bin").iloc[0]
+        rows.append({
+            "ticker": ticker,
+            "events": int(bins["count"].sum() * 5),  # validation is 20% of the session
+            "spread_cents": spread * 100,
+            "flat_share": float((bins["flat_fraction"] * bins["count"]).sum() / bins["count"].sum()),
+            "prior_val": validation.loc["baseline", "log_loss"],
+            "logistic_val": validation.loc["logistic_ofi", "log_loss"],
+            "boosting_val": validation.loc["boosting_ofi", "log_loss"],
+            "prior_test": test.loc["baseline", "log_loss"],
+            "logistic_test": test.loc["logistic_ofi", "log_loss"],
+            "boosting_test": test.loc["boosting_ofi", "log_loss"],
+            "top_decile_cents": top["mean_change_dollars"] * 100,
+            "bottom_decile_cents": bottom["mean_change_dollars"] * 100,
+            "test_trades": int(zero["trades"]),
+            "mid_pnl_per_trade_cents": zero["mid_pnl"] / zero["trades"] * 100,
+            "spread_cost_per_trade_cents": zero["spread_cost"] / zero["trades"] * 100,
+        })
+    summary = pd.DataFrame(rows)
+    summary["extreme_signal_cents"] = (summary["top_decile_cents"] - summary["bottom_decile_cents"]) / 2
+    summary["signal_over_spread"] = summary["extreme_signal_cents"] / summary["spread_cents"]
+    summary["cost_over_signal"] = summary["spread_cost_per_trade_cents"] / summary["mid_pnl_per_trade_cents"]
+    return summary
+
+
+def plot_tickers(summary: pd.DataFrame, output_dir: Path) -> None:
+    """Relative log loss gain and signal-to-spread ratio across tickers."""
+
+    order = summary.sort_values("spread_cents", ascending=False)
+    x = np.arange(len(order))
+
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(9, 3.4))
+
+    for offset, column, colour, label in (
+        (-0.2, "logistic_test", ORANGE, "logistic, 14 features"),
+        (0.2, "boosting_test", BLUE, "boosting, 14 features"),
+    ):
+        gain = 1 - order[column] / order["prior_test"]
+        ax_left.bar(x + offset, gain * 100, width=0.38, color=colour, label=label)
+    ax_left.set_xticks(x)
+    ax_left.set_xticklabels([f"{t}\n{s:.0f}c spread" for t, s in zip(order["ticker"], order["spread_cents"])])
+    ax_left.set_ylabel("log loss below the class prior (%)")
+    ax_left.set_title("Prediction: test block, one evaluation per name", loc="left", fontsize=9)
+    ax_left.legend(frameon=False, fontsize=8)
+    ax_left.grid(axis="x", visible=False)
+
+    ax_right.bar(x - 0.2, order["mid_pnl_per_trade_cents"], width=0.38, color=AQUA,
+                 label="mid-price move captured per trade")
+    ax_right.bar(x + 0.2, order["spread_cost_per_trade_cents"], width=0.38, color=ORANGE,
+                 label="spread paid per trade")
+    ax_right.set_yscale("log")
+    ax_right.set_xticks(x)
+    ax_right.set_xticklabels(order["ticker"])
+    ax_right.set_ylabel("cents per share (log scale)")
+    ax_right.set_title("Execution: aggressive backtest, test block, 0 ms", loc="left", fontsize=9)
+    ax_right.legend(frameon=False, fontsize=8, loc="upper right")
+    ax_right.set_ylim(top=order["spread_cost_per_trade_cents"].max() * 4)
+    ax_right.grid(axis="x", visible=False)
+    for i, ratio in enumerate(order["cost_over_signal"]):
+        ax_right.annotate(f"×{ratio:.0f}", (i + 0.2, order["spread_cost_per_trade_cents"].iloc[i]),
+                          ha="center", va="bottom", fontsize=8, color=TEXT,
+                          xytext=(0, 2), textcoords="offset points")
+
+    fig.tight_layout()
+    fig.savefig(output_dir / "tickers.png")
+    plt.close(fig)
+
+
 def check_report_inputs(baseline_dir: Path, mlp_dir: Path) -> list[Path]:
     required = [
         baseline_dir / name for name in (
@@ -523,6 +613,15 @@ def main() -> None:
         if passive_dir is not None:
             inputs.append(passive_dir / "validation_passive_summary.csv")
             plot_passive_execution(passive_dir, args.output_dir)
+        ticker_summary = summarize_tickers(REPORTS_DIR)
+        if len(ticker_summary) > 1:
+            for folder in TICKER_DIRS.values():
+                for name in ("test_metrics.csv", "test_latency.csv", "validation_score_bins.csv"):
+                    path = REPORTS_DIR / folder / name
+                    if path.is_file():
+                        inputs.append(path)
+            ticker_summary.to_csv(args.output_dir / "ticker_summary.csv", index=False)
+            plot_tickers(ticker_summary, args.output_dir)
     except (FileNotFoundError, KeyError, ValueError) as error:
         parser.exit(1, f"Cannot build figures: {error}\n")
     provenance = {

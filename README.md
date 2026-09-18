@@ -3,7 +3,9 @@
 Predict short-horizon mid-price direction from the order book, then measure
 what that prediction is worth at executable bid and ask prices.
 
-The data is one LOBSTER level-10 session: AAPL, 21 June 2012, 400,391 events.
+The main results use one LOBSTER level-10 session: AAPL, 21 June 2012,
+400,391 events; the other four free samples from the same day serve as a
+cross-name check.
 The models beat a class-prior baseline on a chronologically held-out block.
 The score is monotonically related to the realised mid-price move, with block
 bootstrap intervals that exclude zero in the extreme deciles. Executed
@@ -11,8 +13,9 @@ aggressively, the same signal loses money: about 2 cents of favourable
 mid-price movement per trade against 10 cents of spread cost, even with zero
 fees and zero latency. Executed passively, with limit orders replayed
 against the message stream, it loses less but is filled mostly when the
-price is about to move against it. This is one stock on one day, so it says
-nothing yet about other sessions or a deployable strategy.
+price is about to move against it. The same picture holds on four other names from the same day, in both
+small-tick and large-tick regimes. It is still one day, so it says nothing
+yet about other sessions or a deployable strategy.
 
 ## Research protocol
 
@@ -204,6 +207,44 @@ prediction was worth doing and does not rescue aggressive execution at this
 horizon, which is the reason the next step is passive execution rather than
 a bigger model.
 
+## Five names, one day
+
+The other four free LOBSTER samples cover the same session (21 June 2012,
+level 10): AMZN, GOOG, INTC and MSFT. `run_experiment.py --ticker` runs the
+unchanged pipeline on each of them, with the model and strategy choices
+fixed on AAPL, so each name's test block is a genuine one-time held-out
+evaluation. They fall into two microstructure regimes.
+
+| | GOOG | AAPL | AMZN | MSFT | INTC |
+|---|---:|---:|---:|---:|---:|
+| Price ($) | 571 | 583 | 223 | 31 | 27 |
+| Mean spread (cents) | 27 | 14 | 12 | 1.2 | 1.2 |
+| Mid unchanged after 50 events | 6% | 8% | 15% | 81% | 87% |
+| Boosting test log loss vs prior | −4% | −3% | −4% | −27% | −26% |
+| Extreme deciles, mean move (cents) | 3.0 | 2.1 | 1.4 | 0.27 | 0.19 |
+| Test backtest: mid PnL per trade (cents) | 2.0 | 1.6 | 1.1 | 0.18 | 0.14 |
+| Test backtest: spread cost per trade (cents) | 22.0 | 10.2 | 10.4 | 1.4 | 1.3 |
+| Cost over signal | ×11 | ×6 | ×10 | ×8 | ×9 |
+
+![Five tickers](reports/figures/tickers.png)
+
+GOOG, AAPL and AMZN are small-tick names: the spread is 12 to 27 ticks, the
+touch holds about a hundred shares, and the mid-price moves within 50
+events almost every time. MSFT and INTC are large-tick names: the spread is
+one tick three quarters of the time, the touch holds twelve thousand
+shares, and the mid-price stays put 80 to 87% of the time. On the large-tick
+names the log loss gain over the prior is much larger, mostly because "the
+mid will not move" is predictable from queue depth; the directional part is
+smaller in cents but cleaner, with the top decile going up half the time
+and down 3% of the time.
+
+The execution conclusion is identical across all five: the spread paid per
+aggressive round trip is six to eleven times the mid-price movement the
+signal captures. The ratio does not depend on the tick regime, which is
+what one would expect if both the signal and the cost scale with the
+spread. This is transfer across names on one day, not evidence about other
+days.
+
 ## Passive execution
 
 `lob/passive.py` replays the message stream around each decision to ask what
@@ -291,9 +332,10 @@ python -m pip install -r requirements-lock.txt   # reference versions (Python 3.
 `requirements.txt` lists the unpinned dependencies; expect differences in the
 third decimal of the boosting metrics across scikit-learn versions.
 
-Download the AAPL 2012-06-21 level-10 sample from
-[LOBSTER](https://lobsterdata.com/info/DataSamples.php) and place the two
-files in `data/raw/`:
+Download the level-10 samples from
+[LOBSTER](https://lobsterdata.com/info/DataSamples.php) (AAPL for the main
+results; AMZN, GOOG, INTC and MSFT for the cross-name section) and place
+the files in `data/raw/`:
 
 ```text
 AAPL_2012-06-21_34200000_57600000_message_10.csv
@@ -312,6 +354,7 @@ python run_experiment.py uncertainty_v1   # block bootstrap intervals
 python run_experiment.py features_v1      # message-file feature families, ablations, permutation importance
 python run_experiment.py signal_v1        # signal in cents, reference versus full feature set (validation)
 python run_experiment.py passive_v1       # limit-order replay versus aggressive execution (validation)
+python run_experiment.py baseline_v1 --ticker MSFT --output-dir reports/baseline_MSFT   # any of the five samples
 python make_figures.py                    # figures from the reference folders
 python -m pytest -q
 ```
@@ -327,9 +370,9 @@ with the hashes of the CSVs it used.
 
 ## Limitations and next steps
 
-One stock, one day: the test block shares the session with training, so the
-results say nothing about other dates, and other names from the same date
-would test transfer across assets rather than across time. Execution is
+One day: every test block shares its session with its training block, and
+the five names share the date, so the results say nothing about other
+dates. Execution is
 simplified to full fills of one share at the best level, with no impact, no
 partial fills and no short-borrow cost. The limit-order replay assumes
 cancellations sit behind our order, ignores hidden liquidity at our price,

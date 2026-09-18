@@ -14,5 +14,17 @@
   "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/uncertainty_v1/validation_decile_intervals.csv": "404089427a61d4dbf2c5689f93282a77ecc622a88377075405f61fe9036ea5bb",
   "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/features_v1/validation_metrics_by_feature_set.csv": "fab1cb47d3e2773f87fe972911a1b88a2497bbf8ded2e2d52d6a26dba3882923",
   "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/features_v1/permutation_importance.csv": "0fd5d9907727dc40eb6bb6fa1933334af59e951907527588f77f28e543a8bda4",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/passive_v1/validation_passive_summary.csv": "7d4ac685d403ce5f9e646091bfd1fbb357e7a5d7d53ad63b06033ed702c2590f"
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/passive_v1/validation_passive_summary.csv": "7d4ac685d403ce5f9e646091bfd1fbb357e7a5d7d53ad63b06033ed702c2590f",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_AMZN/test_metrics.csv": "96600c6fc6c3f63101464a4e8a82de95bd063479d10d235bb049129b1972ab48",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_AMZN/test_latency.csv": "728db1cab57996fec4fabe1f499310d8536f4f921c4e0621546fb70ff9fd2b38",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_AMZN/validation_score_bins.csv": "4b2974bebfd65310b261e744170cf35931bb96cea549010d112f700d9b53cf5b",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_GOOG/test_metrics.csv": "668791d2c0a94e8a7aa3d0963f08f31a7f4793b759367cd3f6732e0e2e627715",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_GOOG/test_latency.csv": "898e703fdc604f437e7f268c48f4e4d8daa1fd3fe7d4a900ee783805223f520b",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_GOOG/validation_score_bins.csv": "9d8845dfda824327036921a16b566930c0cd107dc7c7e4df489c5e61a336089f",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_INTC/test_metrics.csv": "5c4f9cc4df6b198467673a1bcbe7f7e57744e56cd4f92945e8180f535066dbbf",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_INTC/test_latency.csv": "aa133e7069496c1b2cfb0d331102e48980af7732926368186e8d72db31bd8963",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_INTC/validation_score_bins.csv": "0ee7cea1adc73fb8c1f08811f7c982c0909db761f807265c7b5d42f1d6f628b5",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_MSFT/test_metrics.csv": "3d339cdd0079596d28b704209c8ba0eaf3eb1a30d8c0a4d677a4ef3ffd74bf70",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_MSFT/test_latency.csv": "2392beab6a4a0aa447ff9615fbec22cb7754cdfba9d9e7c09cd7ca1b418a39f5",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_MSFT/validation_score_bins.csv": "4e32ccbc5136cd1a5f1355c8c4a5704d9f45ee1fb64cd417f4764e4ffa2ef11b"
 }

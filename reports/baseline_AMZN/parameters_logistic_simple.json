@@ -1,0 +1,34 @@
+{
+  "memory": null,
+  "steps": [
+    [
+      "scaler",
+      "StandardScaler()"
+    ],
+    [
+      "classifier",
+      "LogisticRegression(max_iter=2000)"
+    ]
+  ],
+  "transform_input": null,
+  "verbose": false,
+  "scaler": "StandardScaler()",
+  "classifier": "LogisticRegression(max_iter=2000)",
+  "scaler__copy": true,
+  "scaler__with_mean": true,
+  "scaler__with_std": true,
+  "classifier__C": 1.0,
+  "classifier__class_weight": null,
+  "classifier__dual": false,
+  "classifier__fit_intercept": true,
+  "classifier__intercept_scaling": 1,
+  "classifier__l1_ratio": 0.0,
+  "classifier__max_iter": 2000,
+  "classifier__n_jobs": null,
+  "classifier__penalty": "deprecated",
+  "classifier__random_state": null,
+  "classifier__solver": "lbfgs",
+  "classifier__tol": 0.0001,
+  "classifier__verbose": 0,
+  "classifier__warm_start": false
+}
