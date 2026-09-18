@@ -63,6 +63,8 @@ class ExperimentConfig:
     depth_levels: int = 5
     noise_seed: int = 0
     permutation_repeats: int = 5
+    # Threshold sweep for the validation-only signal study.
+    signal_thresholds: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
 
     @property
     def data_dir(self):
@@ -949,11 +951,162 @@ def experiment_features_v1(data: dict, config: ExperimentConfig, output_dir: Pat
     print(f"\nResults saved to: {output_dir}")
 
 
+def experiment_signal_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
+    """Does the 33-feature model move the signal in cents? Validation only.
+
+    For the 14-feature reference and the full feature set: decile means of
+    the future mid-price change with block bootstrap intervals, aggressive
+    round-trip PnL by decile, and a zero-latency backtest across thresholds.
+    """
+
+    events = data["events"]
+    targets = data["targets"]
+    splits = data["splits"]
+
+    features, families = build_feature_families(data, config)
+    reference = families["book"] + families["ofi"]
+    full = reference + [
+        col for name in families if name not in ("book", "ofi", "noise")
+        for col in families[name]
+    ]
+    feature_sets = {"reference": reference, "all": full}
+
+    datasets = prepare_datasets(features, targets, splits, full)
+    X_train, y_train = datasets["train"]
+    X_validation, _ = datasets["validation"]
+
+    block_size = config.event_block_sizes[len(config.event_block_sizes) // 2]
+
+    decile_rows = []
+    extreme_rows = []
+    execution_rows = []
+    threshold_rows = []
+
+    for set_name, columns in feature_sets.items():
+        model = fit_boosting(X_train[columns], y_train)
+        save_model_parameters(output_dir, f"boosting_{set_name}", model)
+
+        scores = compute_scores(model, X_validation[columns])
+        change_cents = targets.loc[scores.index, "future_change"] * 100
+
+        deciles = pd.Series(
+            pd.qcut(scores, q=10, labels=False, duplicates="drop") + 1,
+            index=scores.index,
+            name="score_decile",
+        )
+
+        # 1. Decile means with intervals.
+        table = bootstrap_group_means(
+            values=change_cents,
+            groups=deciles,
+            block_size=block_size,
+            n_resamples=config.n_resamples,
+        )
+        table.insert(0, "feature_set", set_name)
+        decile_rows.append(table.reset_index())
+
+        is_top = deciles.eq(deciles.max()).to_numpy()
+        is_bottom = deciles.eq(deciles.min()).to_numpy()
+        change = change_cents.to_numpy(dtype=float)
+        stacked = np.column_stack([
+            np.where(is_top, change, np.where(is_bottom, -change, 0.0)),
+            (is_top | is_bottom).astype(float),
+        ])
+        extreme = block_bootstrap(
+            stacked,
+            lambda sample: float(sample[:, 0].sum() / sample[:, 1].sum()),
+            block_size=block_size,
+            n_resamples=config.n_resamples,
+        )
+        extreme_rows.append({"feature_set": set_name, **extreme})
+
+        print(
+            f"\n{set_name} ({len(columns)} features) — favourable move in the "
+            f"extreme deciles: {extreme['estimate']:.2f} cents "
+            f"[{extreme['lower']:.2f}, {extreme['upper']:.2f}]"
+        )
+
+        # 2. Aggressive round trips by decile (overlapping, descriptive).
+        execution = analyze_aggressive_execution(
+            model, X_validation[columns], events, horizon=config.horizon
+        )
+        execution.insert(0, "feature_set", set_name)
+        execution_rows.append(execution.reset_index())
+
+        # 3. Zero-latency backtest across thresholds.
+        for threshold in config.signal_thresholds:
+            trades = run_backtest(
+                events=events,
+                scores=scores,
+                horizon=config.horizon,
+                threshold=threshold,
+                quantity=config.trade_quantity,
+                fee_per_share=config.fee_per_share,
+            )
+            trades = decompose_trade_pnl(events, trades)
+
+            row = {
+                "feature_set": set_name,
+                "threshold": threshold,
+                "trades": len(trades),
+                "mid_pnl_per_trade": trades["mid_pnl"].mean() if len(trades) else np.nan,
+                "spread_cost_per_trade": trades["spread_cost"].mean() if len(trades) else np.nan,
+                "net_pnl_per_trade": trades["net_pnl"].mean() if len(trades) else np.nan,
+                "net_pnl_total": trades["net_pnl"].sum(),
+            }
+
+            if len(trades) >= 2 * config.trade_block_size:
+                interval = block_bootstrap(
+                    trades["mid_pnl"].to_numpy(dtype=float),
+                    np.mean,
+                    block_size=config.trade_block_size,
+                    n_resamples=config.n_resamples,
+                )
+                row["mid_pnl_per_trade_lower"] = interval["lower"]
+                row["mid_pnl_per_trade_upper"] = interval["upper"]
+
+            threshold_rows.append(row)
+
+    decile_summary = pd.concat(decile_rows, ignore_index=True)
+    extreme_summary = pd.DataFrame(extreme_rows)
+    execution_summary = pd.concat(execution_rows, ignore_index=True)
+    threshold_summary = pd.DataFrame(threshold_rows)
+
+    print(f"\nValidation — mean future change by decile (cents), 95% intervals, {block_size:,}-event blocks:")
+    print(
+        decile_summary.pivot(index="score_decile", columns="feature_set", values="estimate")
+        .round(3)
+        .to_string()
+    )
+
+    print("\nValidation — aggressive round trips by decile (cents per share):")
+    view = execution_summary.assign(
+        long=lambda d: d["mean_long_pnl"] * 100,
+        short=lambda d: d["mean_short_pnl"] * 100,
+    )
+    print(
+        view.pivot(index="score_bin", columns="feature_set", values=["long", "short"])
+        .round(2)
+        .to_string()
+    )
+
+    print("\nValidation — zero-latency backtest by threshold ($ per trade):")
+    print(threshold_summary.round(4).to_string(index=False))
+
+    decile_summary.to_csv(output_dir / "validation_decile_intervals.csv", index=False)
+    extreme_summary.to_csv(output_dir / "validation_extreme_deciles.csv", index=False)
+    execution_summary.to_csv(output_dir / "validation_execution_bins.csv", index=False)
+    threshold_summary.to_csv(output_dir / "validation_threshold_sweep.csv", index=False)
+
+    print(f"\nResults saved to: {output_dir}")
+
+
 EXPERIMENTS = {
     "baseline_v1": experiment_baseline_v1,
     "mlp_multiseed": experiment_mlp_multiseed,
     "uncertainty_v1": experiment_uncertainty_v1,
     "features_v1": experiment_features_v1,
+    "signal_v1": experiment_signal_v1,
 }
 
 
