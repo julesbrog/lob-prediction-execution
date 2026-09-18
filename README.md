@@ -7,8 +7,8 @@ bit), can you actually make money from it once you pay the spread?
 
 Short answer for the data I had: no. The signal is real, around 2 cents of
 mid-price move on a stock with a 13 cent spread, and crossing the spread
-costs 5 to 10 times that. Limit orders don't fix it either, because they
-mostly get filled when the price is about to go against you. The rest of
+costs 5 to 10 times that. Limit orders don't fix it either: the ones that get filled are the ones
+where the price then ends up going against you. The rest of
 this README is the long answer.
 
 Data: the free LOBSTER samples (Nasdaq, 21 June 2012, 10 levels). Most of
@@ -26,10 +26,11 @@ The last 50 events of each block are dropped so that no label in one block
 uses prices from the next one. Features are causal, scalers and models are
 fit on train only.
 
-I used the test block exactly once, after fixing everything on validation.
-Everything I did afterwards (MLP, bootstrap, new features, passive
-execution) is evaluated on validation only. I say it explicitly where a
-number comes from test.
+I used the test block once, after fixing everything on validation, and
+reused the same test predictions in the bootstrap section to put intervals
+on that backtest. Everything else I did afterwards (MLP, new features,
+passive execution) is evaluated on validation only. I say it explicitly
+where a number comes from test.
 
 For AAPL that gives 240k train / 80k validation / 80k test rows. 50 events is
 about 2.6 s at the median but anywhere between 0.03 s and 15 s depending on
@@ -61,18 +62,19 @@ epoch at a time with the best validation epoch kept, over 5 seeds.
 
 A few things I take from this. OFI is the feature that matters: adding the
 three OFI windows to the logistic model gains more than the ten other
-features combined. Boosting and the MLP are indistinguishable (the
-difference is smaller than the seed-to-seed std of the MLP), and the MLP
-stops improving after 2 to 4 epochs, so I didn't push further on model
-size. On test the logistic model actually beats boosting; I think that's
+features combined. Boosting and the MLP are close on this validation set (the difference is
+about the seed-to-seed std of the MLP, which is not a test of anything but
+gives the scale), and the MLP stops improving after 2 to 4 epochs, so I
+didn't push further on model size. On test the logistic model actually beats boosting; I think that's
 mild overfitting to the morning regime, but one ordering on one day doesn't
 prove much.
 
 ![MLP learning curves](reports/figures/mlp_training.png)
 
 Note that the flat class is only 8% of events on AAPL (the stock is at $580,
-the mid moves almost every 50 events) and none of the models ever predict
-it, so accuracy is basically an up-vs-down number.
+the mid moves almost every 50 events) and the models almost never predict
+it (boosting does in 0.1% of cases), so accuracy is basically an up-vs-down
+number.
 
 ### Adding features from the message file
 
@@ -170,8 +172,9 @@ backtest, 1000 resamples, 95% percentile intervals.
 | Test, spread cost ($) | 124.6 | [113.1, 136.8] |
 | Test, net PnL ($) | −104.4 | [−114.9, −94.3] |
 
-The signal is clearly non-zero and so is the loss. No threshold or seed
-closes a gap of that size.
+The signal is clearly non-zero and so is the loss, on this day and for this
+model, which is all these intervals can say. No threshold or seed closes a
+gap of that size.
 
 ### Does the better model help?
 
@@ -191,8 +194,10 @@ passive execution next instead of a bigger model.
 ## Same thing on four other names
 
 LOBSTER also gives AMZN, GOOG, INTC and MSFT for the same day. I ran the
-unchanged pipeline on each (`--ticker`), keeping all choices from AAPL, so
-each test block is a proper one-shot held-out.
+unchanged pipeline on each (`--ticker`): a separate model trained from
+scratch on each name, with all the choices (features, horizon,
+hyperparameters, threshold) kept from AAPL, so each test block is a proper
+one-shot held-out. This is not a model trained on AAPL applied to MSFT.
 
 | | GOOG | AAPL | AMZN | MSFT | INTC |
 |---|---:|---:|---:|---:|---:|
@@ -223,8 +228,8 @@ one day though, not across days.
 ## Passive execution
 
 `lob/passive.py` replays the message stream after each decision to see
-what a limit order would have done. Assumptions (all listed at the top of
-the file): zero latency; the order either joins the visible queue at the
+what a limit order would have done. It's an approximation with explicit
+assumptions (all listed at the top of the file), not a matching engine: zero latency; the order either joins the visible queue at the
 best quote or improves it by one tick (queue empty in front, possible
 because the spread is 13 ticks on AAPL); only visible executions on our
 side at our price eat the queue in front of us, cancellations are assumed
@@ -244,17 +249,18 @@ net = mid move + (decision mid − limit price) − exit spread / 2 − fees
 | Decisions | 1,229 | 1,228 | 1,229 |
 | Filled | 8.6% | 15.1% | 100% |
 | Median time to fill (s) | 1.9 | 1.5 | 0 |
-| Mid move when filled (cents) | −3.8 | −3.2 | |
-| Mid move when not filled (cents) | +2.7 | +3.1 | |
+| Mid move, decision to expiry, filled orders (cents) | −3.8 | −3.2 | |
+| Mid move, decision to expiry, unfilled orders (cents) | +2.7 | +3.1 | |
 | Entry edge per fill (cents) | +4.4 | +3.6 | −6.6 |
 | Exit cost per fill (cents) | −6.3 | −6.1 | −6.6 |
 | Net per fill (cents) | −5.8 | −5.7 | −11.1 |
 | Net per decision (cents) | −0.5 | −0.9 | −11.1 |
 
-This is textbook adverse selection. The orders that get filled are the ones
-where the mid then moves against us by 3 to 4 cents; the ones that don't
-get filled are exactly the ones where the model was right (price ran away
-by ~3 cents). The half spread you earn at entry is smaller than the half
+This is adverse selection. The mid move here is measured from the decision
+to the expiry of the order, so it includes what happens before the fill:
+orders that get filled are the ones where the mid ends up 3 to 4 cents
+against us over the window, and the ones that don't get filled are the
+ones where the model was right and the price ran away by ~3 cents. The half spread you earn at entry is smaller than the half
 spread you pay at exit because you get filled when the spread is narrow,
 and the adverse move eats the rest. Improving by one tick doubles the fill
 rate and costs a tick, same sign. Same story with the 14-feature model and

@@ -149,6 +149,10 @@ def simulate_passive_round_trip(
 
     fill_index = decision_index + 1 + fill_offset
     entry_price = limit_price / 10_000
+    exit_size_col = "bid_size_1" if side == 1 else "ask_size_1"
+    if int(events[exit_size_col].iloc[exit_index]) < quantity:
+        raise RuntimeError("not enough quantity at the best quote to close the position")
+
     exit_price = (int(bid[exit_index]) if side == 1 else int(ask[exit_index])) / 10_000
 
     fees = 2 * quantity * float(fee_per_share)
