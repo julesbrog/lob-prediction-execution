@@ -51,8 +51,10 @@ after 10 epochs without improvement, 100 at most, over seeds 0, 1, 2, 3 and 42.
 
 ## Results
 
-Reference runs are saved in `reports/baseline_v1` and `reports/mlp_v1_multiseed`.
-New runs go into their own folders and do not update this table.
+Reference runs are saved in `reports/baseline_v1` and `reports/mlp_v1_multiseed`
+(the baseline was re-run from the current code on the reference environment
+and reproduces these numbers exactly). New runs go into their own folders
+and do not update this table.
 
 | Model | Validation log loss | Test log loss | Validation accuracy |
 |---|---:|---:|---:|
