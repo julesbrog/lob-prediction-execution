@@ -1,0 +1,116 @@
+{
+  "experiment": "uncertainty_v1",
+  "created_at_utc": "2026-09-18T12:26:21.159080+00:00",
+  "configuration": {
+    "project_root": "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution",
+    "file_prefix": "AAPL_2012-06-21_34200000_57600000",
+    "n_levels": 10,
+    "horizon": 50,
+    "epsilon_units": 0,
+    "windows": [
+      10,
+      50,
+      100
+    ],
+    "depths": [
+      5,
+      10
+    ],
+    "train_fraction": 0.6,
+    "val_fraction": 0.2,
+    "signal_threshold": 0.3,
+    "trade_quantity": 1,
+    "fee_per_share": 0.0,
+    "latency_scenarios": [
+      0.0,
+      0.001,
+      0.01
+    ],
+    "mlp_seeds": [
+      0,
+      1,
+      2,
+      3,
+      42
+    ],
+    "mlp_max_epochs": 100,
+    "mlp_patience": 10,
+    "event_block_sizes": [
+      500,
+      2000,
+      5000
+    ],
+    "trade_block_size": 25,
+    "n_resamples": 1000
+  },
+  "feature_columns": [
+    "spread",
+    "imbalance_1",
+    "imbalance_5",
+    "imbalance_10",
+    "weighted_mid_offset",
+    "log_return_10",
+    "realized_vol_10",
+    "log_return_50",
+    "realized_vol_50",
+    "log_return_100",
+    "realized_vol_100"
+  ],
+  "ofi_feature_columns": [
+    "spread",
+    "imbalance_1",
+    "imbalance_5",
+    "imbalance_10",
+    "weighted_mid_offset",
+    "log_return_10",
+    "realized_vol_10",
+    "log_return_50",
+    "realized_vol_50",
+    "log_return_100",
+    "realized_vol_100",
+    "ofi_10",
+    "ofi_50",
+    "ofi_100"
+  ],
+  "python": "3.10.12",
+  "platform": "Linux-6.8.0-138-generic-aarch64-with-glibc2.35",
+  "dependencies": {
+    "numpy": "2.2.6",
+    "pandas": "2.3.3",
+    "scipy": "1.15.3",
+    "scikit-learn": "1.7.2",
+    "matplotlib": "3.10.9"
+  },
+  "git_commit": "469e37c24e2736ae03cb78c1cfea0514bc9cb427",
+  "git_dirty": true,
+  "source_sha256": {
+    "run_experiment.py": "c3d3a7fd427abe4da56568ce60ac394009c38be39bef59e8e41d9d54369471dd",
+    "lob/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lob/backtest.py": "defc603b29d6ac71f95e0748cb0d1efe09e05fb6ebf22d19dd502d8b76c09912",
+    "lob/data.py": "209a8b292c0ecfe8ab40d956d7151bbd67291d8ab0780a3bc2a825ff33eb2604",
+    "lob/evaluation.py": "f446e0cd213fb51151f015e2e011589047978ec26a9e85720042ea6e2d399baf",
+    "lob/execution.py": "a4419fd5038aca281d79ec726beb2eec3c6d5c13e329761b74924f252cba9d7c",
+    "lob/experiments.py": "cd36e39c0e4a6d6938dd38445e7ddbb634a8d5da718b6aefed38f33f2b2ded33",
+    "lob/features.py": "1fd2ba60d17fb62abce6063e714f7e27d2427c7f8d3d3ee37e8c765940389edc",
+    "lob/labels.py": "60bfff192364b4439f82acc079930dd8344da18cc394c3d8a7d6bcb4a49ee568",
+    "lob/models.py": "c3560892d8f772a82cced4b27d2a2f7006d29c7403f9e6d94a12b68f7cd78b12",
+    "lob/splits.py": "cb7b0982e7cabc7046908c594e969e61060c5507f65f1d8dc498e942bb28b64c",
+    "lob/uncertainty.py": "664d7886ecaee7dc9838da53b7e25c7b9d4eb46caabf72aa5f03328283125fcd"
+  },
+  "inputs": {
+    "AAPL_2012-06-21_34200000_57600000_message_10.csv": {
+      "sha256": "6562394b996138d5c4527b1282e77a1a385e844110550c34628fbd73bc5411e5",
+      "bytes": 16641275
+    },
+    "AAPL_2012-06-21_34200000_57600000_orderbook_10.csv": {
+      "sha256": "ed75450031996e81bdc5fc985f6afe6851c81d7b2b39bccf13c56d845fe6ff5d",
+      "bytes": 93481244
+    }
+  },
+  "protocol": {
+    "fit_data": "train only",
+    "mlp_selection": "minimum validation log loss; no test evaluation",
+    "test": "baseline_v1 reproduces the previously disclosed test experiment",
+    "fills": "best level only, no impact, instantaneous acknowledgements"
+  }
+}
