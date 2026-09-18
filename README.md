@@ -122,18 +122,17 @@ percentile intervals.
 
 | Quantity | Estimate | 95% interval |
 |---|---:|---:|
-| Validation, decile 10 mean move (cents) | +2.25 | [+1.74, +2.70] |
-| Validation, decile 1 mean move (cents) | −1.94 | [−2.35, −1.56] |
-| Validation, favourable move in the two extreme deciles (cents) | 2.10 | [1.79, 2.40] |
-| Test, mid-price PnL, 1,223 trades ($) | 21.1 | [17.9, 24.3] |
-| Test, spread cost ($) | 125.5 | [114.0, 138.0] |
-| Test, net PnL ($) | −104.4 | [−115.2, −94.6] |
+| Validation, decile 10 mean move (cents) | +2.31 | [+1.79, +2.77] |
+| Validation, decile 1 mean move (cents) | −1.92 | [−2.35, −1.53] |
+| Validation, favourable move in the two extreme deciles (cents) | 2.11 | [1.82, 2.43] |
+| Test, mid-price PnL, 1,224 trades ($) | 20.2 | [17.1, 23.4] |
+| Test, spread cost ($) | 124.6 | [113.1, 136.8] |
+| Test, net PnL ($) | −104.4 | [−114.9, −94.3] |
 
 The signal is distinguishable from zero, and so is the loss. The two cannot be
 closed by a threshold or a seed: on this day and at this horizon, the
 directional edge is an order of magnitude smaller than the cost of crossing
-the spread twice. The backtest here uses zero latency and no period cutoff, so
-the trade count differs by one from the latency table.
+the spread twice.
 
 ## Code layout
 

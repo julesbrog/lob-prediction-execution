@@ -1,8 +1,8 @@
 {
   "experiment": "uncertainty_v1",
-  "created_at_utc": "2026-09-18T12:26:21.159080+00:00",
+  "created_at_utc": "2026-09-18T12:40:35.835485+00:00",
   "configuration": {
-    "project_root": "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution",
+    "project_root": "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution",
     "file_prefix": "AAPL_2012-06-21_34200000_57600000",
     "n_levels": 10,
     "horizon": 50,
@@ -72,16 +72,16 @@
     "ofi_50",
     "ofi_100"
   ],
-  "python": "3.10.12",
-  "platform": "Linux-6.8.0-138-generic-aarch64-with-glibc2.35",
+  "python": "3.12.13",
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
   "dependencies": {
-    "numpy": "2.2.6",
-    "pandas": "2.3.3",
-    "scipy": "1.15.3",
-    "scikit-learn": "1.7.2",
-    "matplotlib": "3.10.9"
+    "numpy": "2.5.3",
+    "pandas": "3.0.5",
+    "scipy": "1.18.1",
+    "scikit-learn": "1.9.1",
+    "matplotlib": "3.11.2"
   },
-  "git_commit": "469e37c24e2736ae03cb78c1cfea0514bc9cb427",
+  "git_commit": "a53fa61afe85ca2b753043eb3d32ad9ab822119f",
   "git_dirty": true,
   "source_sha256": {
     "run_experiment.py": "c3d3a7fd427abe4da56568ce60ac394009c38be39bef59e8e41d9d54369471dd",

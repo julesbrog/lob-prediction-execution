@@ -1,15 +1,15 @@
 {
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_v1/validation_metrics.csv": "dbe522cd19ddd48d2c385be08acda37bb68df55e3f09f8bd8c5d0345b9034aa1",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_v1/test_metrics.csv": "a54a4fbaccc225f0eff6b31cdb0143e5d951d7ac2767910967b8b0cd8fc42d3a",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_v1/validation_latency.csv": "1abcff8de4ae42a905a3fb5b71ee5b218531022fdf50eb29eee0fc5458014eed",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_v1/test_latency.csv": "51b020c977a2d285500eb7f3a77a25a528834486ba03a72aea960a6674a1a0a4",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_v1/validation_score_bins.csv": "ad829fba8b67462ff25ed3884a67ef50f6eac4cbdc957cbdf1b240faf5cbbb0d",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/baseline_v1/validation_execution_bins.csv": "b3ba5b3261a6aa023ecbb7846f4609b13c3abbd20f7c9a5692ffa12b289e9d1c",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/validation_metrics_summary.csv": "084b52af4b27d0cf7f4d9200ab4bd6055254ad616df0b610003f90e6ceae2583",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_0.csv": "a92c501e3fbb7a38966cd71a7ba61b738fbee7ad992518dd6b33ee60eb2c6af0",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_1.csv": "cf10b1f696b83e85df5eedf69bcd4d84b6a1dfef7db4feedd7c208d61e21651b",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_2.csv": "f375fe62482965012a39a561a89ab6f4d246bb08b9da6f9ecd7623060d1847c0",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_3.csv": "c029117f7621dd2193fb64984253d39959fc0b403644733405638b5822cf6872",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_42.csv": "a04c77f4b29c342928c01de41f5723635fc57baf1d33afdda98e3702307581b6",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/uncertainty_v1/validation_decile_intervals.csv": "1ff3e0bb81622316ea91cffaae402ea5c1e9c6bedce9954417921706719e3ed4"
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/baseline_v1/validation_metrics.csv": "dbe522cd19ddd48d2c385be08acda37bb68df55e3f09f8bd8c5d0345b9034aa1",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/baseline_v1/test_metrics.csv": "a54a4fbaccc225f0eff6b31cdb0143e5d951d7ac2767910967b8b0cd8fc42d3a",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/baseline_v1/validation_latency.csv": "1abcff8de4ae42a905a3fb5b71ee5b218531022fdf50eb29eee0fc5458014eed",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/baseline_v1/test_latency.csv": "51b020c977a2d285500eb7f3a77a25a528834486ba03a72aea960a6674a1a0a4",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/baseline_v1/validation_score_bins.csv": "172f504086cbb8fc07d51ad6fe71a130a2dd6d7c38223d2379efe4de2a4c35e9",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/baseline_v1/validation_execution_bins.csv": "1731c16626438c75074abc5f16f1c0bc40a26a9eb4c65b282d55b2a65f4b0e38",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/mlp_v1_multiseed/validation_metrics_summary.csv": "084b52af4b27d0cf7f4d9200ab4bd6055254ad616df0b610003f90e6ceae2583",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_0.csv": "a92c501e3fbb7a38966cd71a7ba61b738fbee7ad992518dd6b33ee60eb2c6af0",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_1.csv": "cf10b1f696b83e85df5eedf69bcd4d84b6a1dfef7db4feedd7c208d61e21651b",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_2.csv": "f375fe62482965012a39a561a89ab6f4d246bb08b9da6f9ecd7623060d1847c0",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_3.csv": "c029117f7621dd2193fb64984253d39959fc0b403644733405638b5822cf6872",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_42.csv": "a04c77f4b29c342928c01de41f5723635fc57baf1d33afdda98e3702307581b6",
+  "/Users/julesbroglin/Documents/Claude/Projects/lob-prediction-execution/reports/uncertainty_v1/validation_decile_intervals.csv": "404089427a61d4dbf2c5689f93282a77ecc622a88377075405f61fe9036ea5bb"
 }
