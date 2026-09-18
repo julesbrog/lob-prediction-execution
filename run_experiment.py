@@ -29,7 +29,7 @@ from lob.features import (
     compute_rolling_ofi,
 )
 from lob.labels import make_targets
-from lob.models import fit_baseline, fit_boosting, fit_logistic
+from lob.models import fit_baseline, fit_boosting, fit_logistic, fit_mlp
 from lob.splits import make_temporal_splits, prepare_datasets
 
 # Experiment configuration
@@ -40,7 +40,7 @@ FILE_PREFIX = "AAPL_2012-06-21_34200000_57600000"
 N_LEVELS = 10
 
 HORIZON = 50
-EPSILON_UNITS = 0.0  # 200 units correspond to $0.01.
+EPSILON_UNITS = 0  # 200 units correspond to $0.01.
 WINDOWS = (10, 50, 100)
 DEPTHS = (5, 10)
 
@@ -203,7 +203,75 @@ def main() -> None:
 
     X_train_ofi, y_train_ofi = datasets_ofi["train"]
     X_validation_ofi, y_validation_ofi = datasets_ofi["validation"]
+    # Compare fixed MLP seeds using train and validation only.
+    seeds = (0, 1, 2, 3, 42)
 
+    output_dir = PROJECT_ROOT / "reports" / "mlp_v1_multiseed"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    records = []
+
+    for seed in seeds:
+        print(f"\n{'=' * 50}")
+        print(f"MLP — random_state={seed}")
+        print(f"{'=' * 50}")
+
+        mlp_model, history = fit_mlp(
+            X_train=X_train_ofi,
+            y_train=y_train_ofi,
+            X_validation=X_validation_ofi,
+            y_validation=y_validation_ofi,
+            random_state=seed,
+            max_epochs=100,
+            patience=10,
+        )
+
+        metrics = evaluate_model(
+            mlp_model,
+            X_validation_ofi,
+            y_validation_ofi,
+        )
+
+        best_row = history.loc[history["is_best"]].iloc[0]
+
+        records.append(
+            {
+                "seed": seed,
+                "best_epoch": int(best_row["epoch"]),
+                "epochs_run": len(history),
+                **metrics,
+            }
+        )
+
+        history.to_csv(
+            output_dir / f"training_history_seed_{seed}.csv",
+            index=False,
+        )
+
+        print(
+            f"\nSeed {seed} | "
+            f"best epoch: {int(best_row['epoch'])} | "
+            f"validation log loss: {metrics['log_loss']:.6f}"
+        )
+
+    seed_results = pd.DataFrame(records).set_index("seed")
+    metric_columns = ["log_loss", "accuracy", "macro_f1"]
+
+    summary = seed_results[metric_columns].agg(["mean", "std", "min", "max"])
+
+    print("\nMLP — validation results by seed:")
+    print(seed_results.round(6).to_string())
+
+    print("\nMLP — variability across seeds:")
+    print(summary.round(6).to_string())
+
+    seed_results.to_csv(output_dir / "validation_metrics_by_seed.csv")
+    summary.to_csv(output_dir / "validation_metrics_summary.csv")
+
+    print(f"\nResults saved to: {output_dir}")
+
+    # Stop before the existing baseline and test experiment.
+    return
     # 7. Fit all models using training data only.
     baseline = fit_baseline(X_train, y_train)
 
