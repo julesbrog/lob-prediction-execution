@@ -32,6 +32,7 @@ from lob.message_features import (
     compute_noise_feature,
     compute_trade_features,
 )
+from lob.passive import run_passive_backtest
 from lob.uncertainty import block_bootstrap, bootstrap_group_means
 from sklearn.inspection import permutation_importance
 
@@ -65,6 +66,8 @@ class ExperimentConfig:
     permutation_repeats: int = 5
     # Threshold sweep for the validation-only signal study.
     signal_thresholds: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+    # Passive placement: join the best quote (0) or improve inside the spread.
+    improve_ticks: tuple[int, ...] = (0, 1)
 
     @property
     def data_dir(self):
@@ -1101,12 +1104,140 @@ def experiment_signal_v1(data: dict, config: ExperimentConfig, output_dir: Path)
     print(f"\nResults saved to: {output_dir}")
 
 
+def experiment_passive_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
+    """Passive versus aggressive execution of the same signals, validation only.
+
+    For each feature set, threshold and placement (join the queue or improve
+    by one tick): fill rate, PnL decomposition of filled orders, the
+    mid-price move conditional on being filled or not (adverse selection),
+    and the aggressive strategy on the same decisions for comparison.
+    """
+
+    events = data["events"]
+    targets = data["targets"]
+    splits = data["splits"]
+
+    features, families = build_feature_families(data, config)
+    reference = families["book"] + families["ofi"]
+    full = reference + [
+        col for name in families if name not in ("book", "ofi", "noise")
+        for col in families[name]
+    ]
+    feature_sets = {"reference": reference, "all": full}
+
+    datasets = prepare_datasets(features, targets, splits, full)
+    X_train, y_train = datasets["train"]
+    X_validation, _ = datasets["validation"]
+
+    summary_rows = []
+    all_orders = []
+
+    for set_name, columns in feature_sets.items():
+        model = fit_boosting(X_train[columns], y_train)
+        save_model_parameters(output_dir, f"boosting_{set_name}", model)
+        scores = compute_scores(model, X_validation[columns])
+
+        for threshold in config.signal_thresholds:
+            aggressive = decompose_trade_pnl(
+                events,
+                run_backtest(
+                    events=events, scores=scores, horizon=config.horizon,
+                    threshold=threshold, quantity=config.trade_quantity,
+                    fee_per_share=config.fee_per_share,
+                ),
+            )
+
+            for improve_ticks in config.improve_ticks:
+                orders = run_passive_backtest(
+                    events=events, scores=scores, horizon=config.horizon,
+                    threshold=threshold, improve_ticks=improve_ticks,
+                    quantity=config.trade_quantity,
+                    fee_per_share=config.fee_per_share,
+                )
+                orders.insert(0, "feature_set", set_name)
+                orders.insert(1, "threshold", threshold)
+                all_orders.append(orders)
+
+                filled = orders.loc[orders["filled"]]
+                unfilled = orders.loc[~orders["filled"]]
+
+                row = {
+                    "feature_set": set_name,
+                    "threshold": threshold,
+                    "improve_ticks": improve_ticks,
+                    "orders": len(orders),
+                    "filled": len(filled),
+                    "fill_rate": len(filled) / len(orders) if len(orders) else np.nan,
+                    "median_fill_delay_events": (
+                        (filled["fill_index"] - filled["decision_index"]).median()
+                        if len(filled) else np.nan
+                    ),
+                    "median_fill_delay_seconds": (
+                        (filled["fill_time"] - filled["decision_time"]).median()
+                        if len(filled) else np.nan
+                    ),
+                    "mid_move_filled": filled["mid_move"].mean() if len(filled) else np.nan,
+                    "mid_move_unfilled": unfilled["mid_move"].mean() if len(unfilled) else np.nan,
+                    "mid_move_all_orders": orders["mid_move"].mean() if len(orders) else np.nan,
+                    "entry_edge_per_fill": filled["entry_edge"].mean() if len(filled) else np.nan,
+                    "exit_cost_per_fill": filled["exit_cost"].mean() if len(filled) else np.nan,
+                    "net_pnl_per_fill": filled["net_pnl"].mean() if len(filled) else np.nan,
+                    "net_pnl_per_order": filled["net_pnl"].sum() / len(orders) if len(orders) else np.nan,
+                    "passive_net_total": filled["net_pnl"].sum(),
+                    "aggressive_trades": len(aggressive),
+                    "aggressive_net_per_trade": aggressive["net_pnl"].mean() if len(aggressive) else np.nan,
+                    "aggressive_net_total": aggressive["net_pnl"].sum(),
+                }
+
+                # Interval on net PnL per order (unfilled orders count as zero),
+                # blocks of consecutive orders.
+                per_order = orders["net_pnl"].fillna(0.0).to_numpy(dtype=float)
+                if len(per_order) >= 2 * config.trade_block_size:
+                    interval = block_bootstrap(
+                        per_order, np.mean,
+                        block_size=config.trade_block_size,
+                        n_resamples=config.n_resamples,
+                    )
+                    row["net_pnl_per_order_lower"] = interval["lower"]
+                    row["net_pnl_per_order_upper"] = interval["upper"]
+
+                summary_rows.append(row)
+
+                print(
+                    f"{set_name:<10} thr {threshold:.1f} improve {improve_ticks} | "
+                    f"orders {len(orders):>5} fill {row['fill_rate']:.2f} | "
+                    f"net/fill {row['net_pnl_per_fill']:+.4f} "
+                    f"net/order {row['net_pnl_per_order']:+.4f} | "
+                    f"aggressive net/trade {row['aggressive_net_per_trade']:+.4f}",
+                    flush=True,
+                )
+
+    summary = pd.DataFrame(summary_rows)
+    orders_table = pd.concat(all_orders, ignore_index=True)
+
+    print("\nValidation — passive execution summary ($ per share unless stated):")
+    print(
+        summary[[
+            "feature_set", "threshold", "improve_ticks", "orders", "fill_rate",
+            "median_fill_delay_seconds", "mid_move_filled", "mid_move_unfilled",
+            "entry_edge_per_fill", "exit_cost_per_fill", "net_pnl_per_fill",
+            "net_pnl_per_order", "aggressive_net_per_trade",
+        ]].round(4).to_string(index=False)
+    )
+
+    summary.to_csv(output_dir / "validation_passive_summary.csv", index=False)
+    orders_table.to_csv(output_dir / "validation_passive_orders.csv", index=False)
+
+    print(f"\nResults saved to: {output_dir}")
+
+
 EXPERIMENTS = {
     "baseline_v1": experiment_baseline_v1,
     "mlp_multiseed": experiment_mlp_multiseed,
     "uncertainty_v1": experiment_uncertainty_v1,
     "features_v1": experiment_features_v1,
     "signal_v1": experiment_signal_v1,
+    "passive_v1": experiment_passive_v1,
 }
 
 
