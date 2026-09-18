@@ -13,5 +13,6 @@
   "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/mlp_v1_multiseed/training_history_seed_42.csv": "a04c77f4b29c342928c01de41f5723635fc57baf1d33afdda98e3702307581b6",
   "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/uncertainty_v1/validation_decile_intervals.csv": "404089427a61d4dbf2c5689f93282a77ecc622a88377075405f61fe9036ea5bb",
   "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/features_v1/validation_metrics_by_feature_set.csv": "fab1cb47d3e2773f87fe972911a1b88a2497bbf8ded2e2d52d6a26dba3882923",
-  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/features_v1/permutation_importance.csv": "0fd5d9907727dc40eb6bb6fa1933334af59e951907527588f77f28e543a8bda4"
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/features_v1/permutation_importance.csv": "0fd5d9907727dc40eb6bb6fa1933334af59e951907527588f77f28e543a8bda4",
+  "/sessions/rcw-013mrdlv1ksxnj5reslsjqom/mnt/lob-prediction-execution/reports/passive_v1/validation_passive_summary.csv": "7d4ac685d403ce5f9e646091bfd1fbb357e7a5d7d53ad63b06033ed702c2590f"
 }

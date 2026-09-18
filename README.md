@@ -9,8 +9,10 @@ The score is monotonically related to the realised mid-price move, with block
 bootstrap intervals that exclude zero in the extreme deciles. Executed
 aggressively, the same signal loses money: about 2 cents of favourable
 mid-price movement per trade against 10 cents of spread cost, even with zero
-fees and zero latency. This is one stock on one day, so it says nothing yet
-about other sessions or a deployable strategy.
+fees and zero latency. Executed passively, with limit orders replayed
+against the message stream, it loses less but is filled mostly when the
+price is about to move against it. This is one stock on one day, so it says
+nothing yet about other sessions or a deployable strategy.
 
 ## Research protocol
 
@@ -202,6 +204,59 @@ prediction was worth doing and does not rescue aggressive execution at this
 horizon, which is the reason the next step is passive execution rather than
 a bigger model.
 
+## Passive execution
+
+`lob/passive.py` replays the message stream around each decision to ask what
+a limit order would have done. The assumptions are listed at the top of the
+file; the ones that matter are: zero latency; the order either joins the
+back of the visible queue at the best quote or improves the quote by one
+tick (an empty queue in front, possible because the spread averages 13
+ticks); only visible executions on our side and at our price consume the
+queue ahead, and cancellations are assumed to sit behind us; a trade on our
+side at a worse price than ours would have hit us first; unfilled orders are
+cancelled 50 events after the decision; a filled position is closed
+aggressively at that same event. Each filled round trip decomposes as
+
+`net PnL = mid-price move + (decision mid − limit price) − exit spread / 2 − fees`
+
+so the entry earns about half a spread and the exit pays about half a spread.
+
+![Passive execution](reports/figures/passive_execution.png)
+
+| Validation, 33 features, threshold 0.3 | Join the queue | Improve one tick | Aggressive |
+|---|---:|---:|---:|
+| Decisions | 1,229 | 1,228 | 1,229 |
+| Filled | 8.6% | 15.1% | 100% |
+| Median time to fill (s) | 1.9 | 1.5 | 0 |
+| Mid-price move when filled (cents) | −3.8 | −3.2 | |
+| Mid-price move when not filled (cents) | +2.7 | +3.1 | |
+| Entry edge per fill (cents) | +4.4 | +3.6 | −6.6 |
+| Exit cost per fill (cents) | −6.3 | −6.1 | −6.6 |
+| Net per fill (cents) | −5.8 | −5.7 | −11.1 |
+| Net per decision (cents) | −0.5 | −0.9 | −11.1 |
+
+This is adverse selection in its plainest form. The orders that get filled
+are the ones where the mid-price then moves against the position by 3 to 4
+cents; the orders that do not get filled are the ones where the signal was
+right, and the price moved away by about 3 cents. The half spread earned at
+entry is smaller than the half spread paid at exit, because fills happen
+when the spread is narrow, and the adverse move takes the rest. Improving
+the quote by a tick roughly doubles the fill rate and costs a tick of edge;
+it does not change the sign. The picture is the same with the 14-feature
+model and at every threshold (`reports/passive_v1`).
+
+Passive entry therefore loses about ten times less per decision than
+aggressive entry, but it still loses, and it captures almost none of the
+signal: the 85% of decisions that go unfilled are precisely the ones the
+model got right. With this signal and this horizon, the best of the three
+actions studied so far, aggressive, passive or abstain, is abstain.
+
+What that leaves open is the two-sided case: resting on both sides and
+exiting passively as well, which is the market-maker's problem. There the
+question is not whether the signal pays for crossing the spread but whether
+it reduces the adverse selection a quoter suffers, by skewing or pulling
+quotes when the model expects a move. That is the next experiment.
+
 ## Code layout
 
 | File | Responsibility |
@@ -214,7 +269,8 @@ a bigger model.
 | `lob/splits.py` | Purged chronological splits and usable-row masks |
 | `lob/models.py` | Model fitting, including epoch-wise MLP training |
 | `lob/evaluation.py` | Classification diagnostics, score bins, PnL decomposition |
-| `lob/execution.py`, `lob/backtest.py` | Quote execution and non-overlapping strategy simulation |
+| `lob/execution.py`, `lob/backtest.py` | Aggressive execution and non-overlapping strategy simulation |
+| `lob/passive.py` | Limit-order replay: queue position, fills, cancellation, PnL decomposition |
 | `lob/message_features.py` | Trade, order-flow, activity and depth features from the message file |
 | `lob/uncertainty.py` | Moving block bootstrap |
 | `make_figures.py` | Figures from saved CSVs, no training required |
@@ -222,7 +278,7 @@ a bigger model.
 Input validation is deliberately strict: crossed books, non-monotonic
 timestamps, sentinel prices, insufficient exit liquidity and future columns
 used as features all raise rather than being silently handled. `pytest` runs
-120 tests over features, labels, splits, execution, latency and the bootstrap.
+127 tests over features, labels, splits, execution, latency, the limit-order replay and the bootstrap.
 
 ## Setup and data
 
@@ -255,6 +311,7 @@ python run_experiment.py mlp_multiseed    # MLP on validation, 5 seeds
 python run_experiment.py uncertainty_v1   # block bootstrap intervals
 python run_experiment.py features_v1      # message-file feature families, ablations, permutation importance
 python run_experiment.py signal_v1        # signal in cents, reference versus full feature set (validation)
+python run_experiment.py passive_v1       # limit-order replay versus aggressive execution (validation)
 python make_figures.py                    # figures from the reference folders
 python -m pytest -q
 ```
@@ -264,8 +321,8 @@ Each run creates a new directory under `reports/runs/` (or the path given with
 configuration, input and source hashes, dependency versions and git revision,
 `dataset_summary.json`, fitted estimator parameters, per-scenario trade and
 order logs, a `status.json`, and the metric CSVs. The reference folders are
-never overwritten. `make_figures.py` accepts `--baseline-dir`, `--mlp-dir`, `--uncertainty-dir`
-and `--features-dir` to render a different run, and writes `figure_sources.json`
+never overwritten. `make_figures.py` accepts `--baseline-dir`, `--mlp-dir`, `--uncertainty-dir`,
+`--features-dir` and `--passive-dir` to render a different run, and writes `figure_sources.json`
 with the hashes of the CSVs it used.
 
 ## Limitations and next steps
@@ -274,12 +331,11 @@ One stock, one day: the test block shares the session with training, so the
 results say nothing about other dates, and other names from the same date
 would test transfer across assets rather than across time. Execution is
 simplified to full fills of one share at the best level, with no impact, no
-partial fills and no short-borrow cost. There is no passive execution yet: a
-limit-order model has to handle queue position, cancellations ahead of the
-order, partial fills and the fact that filled orders are not a random sample
-of signals.
+partial fills and no short-borrow cost. The limit-order replay assumes
+cancellations sit behind our order, ignores hidden liquidity at our price,
+has no partial fills and no latency on placement or cancellation; it also
+cannot know how other participants would have reacted to our order.
 
-Planned, in order: a passive execution simulator with explicit queue and
-fill assumptions, then an aggressive / passive / abstain policy; event
-versus clock-time horizons and decisions after estimated costs;
+Planned, in order: two-sided passive quoting with the signal used to skew
+or pull quotes; event versus clock-time horizons and decisions after estimated costs;
 more sessions with a fresh reserved test block.

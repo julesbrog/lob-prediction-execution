@@ -388,6 +388,67 @@ def plot_feature_families(features_dir: Path, output_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_passive_execution(passive_dir: Path, output_dir: Path) -> None:
+    """Fill rate, adverse selection and net PnL per order across thresholds."""
+
+    summary = pd.read_csv(passive_dir / "validation_passive_summary.csv")
+    frame = summary.loc[summary["feature_set"].eq("all")]
+    if frame.empty:
+        raise ValueError("passive summary has no rows for the full feature set")
+
+    join = frame.loc[frame["improve_ticks"].eq(0)].sort_values("threshold")
+    improve = frame.loc[frame["improve_ticks"].eq(1)].sort_values("threshold")
+
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3.3))
+
+    ax = axes[0]
+    ax.plot(join["threshold"], join["fill_rate"] * 100, "o-", color=BLUE,
+            markersize=4, label="join the queue")
+    ax.plot(improve["threshold"], improve["fill_rate"] * 100, "s-", color=ORANGE,
+            markersize=4, label="improve one tick")
+    ax.set_ylim(0, None)
+    ax.set_xlabel("score threshold")
+    ax.set_ylabel("orders filled within 50 events (%)")
+    ax.set_title("Fill rate", loc="left")
+    ax.legend(frameon=False, fontsize=8)
+
+    ax = axes[1]
+    for frame_, marker, colour, label in (
+        (join, "o", BLUE, "join"), (improve, "s", ORANGE, "improve"),
+    ):
+        ax.plot(frame_["threshold"], frame_["mid_move_filled"] * 100, marker + "-",
+                color=colour, markersize=4, label=f"{label}: filled")
+        ax.plot(frame_["threshold"], frame_["mid_move_unfilled"] * 100, marker + "--",
+                color=colour, markersize=4, alpha=0.6, label=f"{label}: not filled")
+    ax.axhline(0, color=GRAY, linewidth=0.8)
+    ax.set_xlabel("score threshold")
+    ax.set_ylabel("mid-price move in our favour (cents)")
+    ax.set_title("Adverse selection", loc="left")
+    ax.legend(frameon=False, fontsize=7, ncol=2)
+
+    ax = axes[2]
+    ax.plot(join["threshold"], join["net_pnl_per_order"] * 100, "o-", color=BLUE,
+            markersize=4, label="passive, join")
+    ax.plot(improve["threshold"], improve["net_pnl_per_order"] * 100, "s-",
+            color=ORANGE, markersize=4, label="passive, improve")
+    ax.plot(join["threshold"], join["aggressive_net_per_trade"] * 100, "^-",
+            color=GRAY, markersize=4, label="aggressive")
+    ax.axhline(0, color=GRAY, linewidth=0.8)
+    ax.set_xlabel("score threshold")
+    ax.set_ylabel("net PnL per decision (cents)")
+    ax.set_title("Net PnL per decision", loc="left")
+    ax.legend(frameon=False, fontsize=8)
+
+    for ax in axes:
+        ax.grid(axis="x", visible=False)
+
+    fig.suptitle("Validation, boosting on 33 features, one share, zero latency",
+                 fontsize=9, x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(output_dir / "passive_execution.png")
+    plt.close(fig)
+
+
 def check_report_inputs(baseline_dir: Path, mlp_dir: Path) -> list[Path]:
     required = [
         baseline_dir / name for name in (
@@ -436,8 +497,12 @@ def main() -> None:
     parser.add_argument("--features-dir", type=Path,
                         default=REPORTS_DIR / "features_v1",
                         help="Feature family results; skipped when missing.")
+    parser.add_argument("--passive-dir", type=Path,
+                        default=REPORTS_DIR / "passive_v1",
+                        help="Passive execution results; skipped when missing.")
     parser.add_argument("--output-dir", type=Path, default=FIGURES_DIR)
     args = parser.parse_args()
+    passive_dir = args.passive_dir if args.passive_dir.is_dir() else None
     uncertainty_dir = args.uncertainty_dir if args.uncertainty_dir.is_dir() else None
     features_dir = args.features_dir if args.features_dir.is_dir() else None
     try:
@@ -455,6 +520,9 @@ def main() -> None:
                 features_dir / "permutation_importance.csv",
             ]
             plot_feature_families(features_dir, args.output_dir)
+        if passive_dir is not None:
+            inputs.append(passive_dir / "validation_passive_summary.csv")
+            plot_passive_execution(passive_dir, args.output_dir)
     except (FileNotFoundError, KeyError, ValueError) as error:
         parser.exit(1, f"Cannot build figures: {error}\n")
     provenance = {
