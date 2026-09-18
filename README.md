@@ -1,112 +1,105 @@
-# Limit Order Book Prediction & Execution
+# lob-prediction-execution
 
-Predict short-horizon mid-price direction from the order book, then measure
-what that prediction is worth at executable bid and ask prices.
+Personal project, done on the side of my MSc in financial engineering at EPFL.
+The question I wanted to answer: if you can predict where the mid-price of a
+stock is going over the next few dozen order book events (and you can, a
+bit), can you actually make money from it once you pay the spread?
 
-The main results use one LOBSTER level-10 session: AAPL, 21 June 2012,
-400,391 events; the other four free samples from the same day serve as a
-cross-name check.
-The models beat a class-prior baseline on a chronologically held-out block.
-The score is monotonically related to the realised mid-price move, with block
-bootstrap intervals that exclude zero in the extreme deciles. Executed
-aggressively, the same signal loses money: about 2 cents of favourable
-mid-price movement per trade against 10 cents of spread cost, even with zero
-fees and zero latency. Executed passively, with limit orders replayed
-against the message stream, it loses less but is filled mostly when the
-price is about to move against it. The same picture holds on four other names from the same day, in both
-small-tick and large-tick regimes. It is still one day, so it says nothing
-yet about other sessions or a deployable strategy.
+Short answer for the data I had: no. The signal is real, around 2 cents of
+mid-price move on a stock with a 13 cent spread, and crossing the spread
+costs 5 to 10 times that. Limit orders don't fix it either, because they
+mostly get filled when the price is about to go against you. The rest of
+this README is the long answer.
 
-## Research protocol
+Data: the free LOBSTER samples (Nasdaq, 21 June 2012, 10 levels). Most of
+the work is on AAPL (400k events); the four other names are used at the end
+as a check.
 
-- Target: sign of the mid-price change 50 events ahead. Three classes, down,
-  unchanged, up, with a zero threshold in the reference experiment. Labels
-  compare integer quote-price sums, so there are no floating-point ties.
-- Chronological 60 / 20 / 20 split into train, validation and test, with the
-  last 50 label origins of each block removed so no label reaches the next block.
-  Features are causal and may use history from earlier blocks, since that
-  history is available at prediction time.
-- Scalers and models are fitted on the training block only.
-- The test block was evaluated once, with the model and strategy choices fixed
-  on validation. Later experiments (MLP, bootstrap) use validation only; test
-  numbers appear only where they were part of that single evaluation.
+## Setup
 
-Usable observations: 240,084 train, 80,028 validation, 80,029 test. On
-validation, 50 events last 2.6 seconds at the median, and between 0.03 and 15
-seconds at the 1st and 99th percentiles.
+The label is the sign of the mid-price change 50 events later, three classes
+(down / flat / up). I compare integer prices from the LOBSTER files directly
+so there are no rounding issues with the flat class.
+
+The day is split chronologically 60/20/20 into train / validation / test.
+The last 50 events of each block are dropped so that no label in one block
+uses prices from the next one. Features are causal, scalers and models are
+fit on train only.
+
+I used the test block exactly once, after fixing everything on validation.
+Everything I did afterwards (MLP, bootstrap, new features, passive
+execution) is evaluated on validation only. I say it explicitly where a
+number comes from test.
+
+For AAPL that gives 240k train / 80k validation / 80k test rows. 50 events is
+about 2.6 s at the median but anywhere between 0.03 s and 15 s depending on
+activity.
 
 ## Features and models
 
-The 14 inputs are the spread, quantity imbalance at levels 1, 5 and 10, the
-quantity-weighted mid-price offset, log returns and realised volatility over
-10, 50 and 100 events, and level-one order flow imbalance (Cont, Kukanov and
-Stoikov) summed over the same windows. OFI counts quote-price and quantity
-changes at the touch; it is not signed trade volume.
+14 features to start with: spread, imbalance at levels 1, 5 and 10, the
+quantity-weighted mid offset, log returns and realised vol over 10/50/100
+events, and order flow imbalance (Cont, Kukanov, Stoikov 2014) summed over
+the same windows.
 
-Models: class-prior baseline; standardised logistic regression on level-one
-imbalance alone, on the 11 book and history features, and on all 14; histogram
-gradient boosting on the 14; an MLP (32, 16) on standardised inputs trained one
-epoch at a time, keeping the epoch with the lowest validation log loss, stopped
-after 10 epochs without improvement, 100 at most, over seeds 0, 1, 2, 3 and 42.
+Models: class-prior baseline, logistic regression (with 1, 11 or 14
+features), histogram gradient boosting, and a small MLP (32, 16) trained one
+epoch at a time with the best validation epoch kept, over 5 seeds.
 
-## Results
+## Results on AAPL
 
-Reference runs are saved in `reports/baseline_v1` and `reports/mlp_v1_multiseed`
-(the baseline was re-run from the current code on the reference environment
-and reproduces these numbers exactly). New runs go into their own folders
-and do not update this table.
-
-| Model | Validation log loss | Test log loss | Validation accuracy |
+| Model | Val log loss | Test log loss | Val accuracy |
 |---|---:|---:|---:|
-| Prior baseline | 0.910 | 0.927 | 48.1% |
+| Prior | 0.910 | 0.927 | 48.1% |
 | Logistic, imbalance only | 0.908 | | 51.1% |
 | Logistic, 11 features | 0.900 | | 52.6% |
 | Logistic, 14 features | 0.889 | 0.894 | 55.3% |
 | Boosting, 14 features | 0.882 | 0.898 | 55.6% |
-| MLP, 14 features, 5 seeds | 0.881 ± 0.002 | not evaluated | 55.9% |
+| MLP, 14 features (5 seeds) | 0.881 ± 0.002 | not evaluated | 55.9% |
 
 ![Model comparison](reports/figures/model_comparison.png)
 
-Three observations. Adding the three OFI windows lowers the logistic log loss
-by 0.011, more than the ten other features add to level-one imbalance; OFI is
-the feature family that matters most here. Boosting and the MLP are within
-seed noise of each other, and the MLP's best epoch is always 2 to 4, so on this
-data a larger model is not the obvious next step. On the test block the
-logistic model has lower log loss than boosting; overfitting to the training
-regime is the natural explanation, but this single ordering does not prove it.
+A few things I take from this. OFI is the feature that matters: adding the
+three OFI windows to the logistic model gains more than the ten other
+features combined. Boosting and the MLP are indistinguishable (the
+difference is smaller than the seed-to-seed std of the MLP), and the MLP
+stops improving after 2 to 4 epochs, so I didn't push further on model
+size. On test the logistic model actually beats boosting; I think that's
+mild overfitting to the morning regime, but one ordering on one day doesn't
+prove much.
 
 ![MLP learning curves](reports/figures/mlp_training.png)
 
-The unchanged class is rare (7.6% of validation, 8.6% of test) and no model
-predicts it, so accuracy is essentially a down-versus-up number. Macro F1
-makes that weakness visible.
+Note that the flat class is only 8% of events on AAPL (the stock is at $580,
+the mid moves almost every 50 events) and none of the models ever predict
+it, so accuracy is basically an up-vs-down number.
 
-### Feature families from the message file
+### Adding features from the message file
 
-The 14 reference features only look at the book. `features_v1` adds four
-families built from the LOBSTER message stream and one control, evaluates
-each family added to the reference and each removed from the full set, and
-ranks every column by permutation importance on validation. All sets are
-fitted on the same rows.
+The 14 features above only use the book snapshots. LOBSTER also gives you
+the messages (submissions, cancellations, executions with direction), so I
+added four families and a control column, and ran ablations: each family
+added to the 14, each family removed from the full set, plus permutation
+importance. Same rows for every feature set.
 
-| Family | Columns |
+| Family | What's in it |
 |---|---|
-| trades | signed and total executed volume over 10, 50, 100 events (visible and hidden executions; a trade that hits a sell order counts positive) |
-| flow | net limit-order flow (signed submissions minus signed cancellations) and cancelled volume over the same windows |
-| activity | log time since the previous event, event rate over 50 and 100 events |
-| depth | log quantity at the touch and over five levels, each side |
-| noise | one standard normal column, independent of the data |
+| trades | signed and total executed volume over 10/50/100 events (a trade hitting a sell order counts positive) |
+| flow | signed submissions minus signed cancellations, and cancelled volume, same windows |
+| activity | log time since last event, event rate over 50 and 100 events |
+| depth | log quantity at the touch and over 5 levels, both sides |
+| noise | one N(0,1) column, as a control |
 
 ![Feature families](reports/figures/feature_families.png)
 
 | Boosting, validation | log loss |
 |---|---:|
-| reference (14) | 0.882 |
-| reference + trades | 0.872 |
-| reference + activity | 0.878 |
-| reference + flow | 0.880 |
-| reference + depth | 0.882 |
-| reference + noise | 0.882 |
+| 14 features | 0.882 |
+| + trades | 0.872 |
+| + activity | 0.878 |
+| + flow | 0.880 |
+| + depth | 0.882 |
+| + noise | 0.882 |
 | all real families (33) | 0.868 |
 | all − trades | 0.878 |
 | all − ofi | 0.871 |
@@ -114,108 +107,92 @@ fitted on the same rows.
 | all − activity | 0.869 |
 | all − flow | 0.867 |
 
-Signed executed volume over the last 10 and 50 events is the strongest
-column in the whole set: permuting it costs 0.021 and 0.015 of log loss,
-against 0.008 for the spread and for OFI over 50 events. Adding the trades
-family alone gains 0.010, ten times the gap between boosting and the MLP.
-Depth adds nothing on its own but 0.002 once trades are present, a plausible
-interaction between resting size at the touch and the volume hitting it.
-Flow adds nothing, and the noise column has exactly zero importance, so the
-boosting model never split on it. The level-1, 5 and 10 imbalances come out
-at zero or slightly negative once OFI and signed volume are in, which says
-they were carrying the same information less precisely.
+Signed trade volume over the last 10 and 50 events is by far the most
+important column (permuting it costs 0.021 and 0.015 of log loss, vs 0.008
+for the spread or OFI). The trades family alone is worth 0.010, ten times
+the boosting-vs-MLP gap. Depth is useless alone but helps a bit once trades
+are in. Flow does nothing. The noise column has exactly zero importance,
+the boosting never split on it. The level 1/5/10 imbalances also drop to
+zero once OFI and signed volume are there, they were carrying the same
+information in a noisier form.
 
-These are validation numbers. The 33-feature model has not been evaluated on
-the test block, and will not be until a fresh session is available.
+I did not evaluate the 33-feature model on test, and won't unless I get
+another day of data.
 
-## From scores to execution
+## From prediction to PnL
 
-The score is P(up) − P(down). Sorting validation events into score deciles
-gives a monotone relation with the realised mid-price change, from −1.9 cents
-in the lowest decile to +2.3 cents in the highest. The right panel shows what
-happens when each event is traded aggressively, buying at the ask and selling
-at the bid 50 events later: even the best decile loses about 12 cents per
-share, because the average spread on this session is 13 cents.
+Score = P(up) − P(down). Sorting validation events by score decile gives a
+clean monotone picture, from −1.9 cents of mid move in the bottom decile to
++2.3 in the top one. The right panel is what happens if you trade each
+event aggressively (buy at the ask, sell at the bid 50 events later): even
+the top decile loses ~12 cents per share, because the average spread is 13
+cents.
 
 ![Validation score diagnostics](reports/figures/score_bins.png)
 
-The strategy backtest fixes the rules on validation: buy when the score exceeds
-0.3, sell short below −0.3, otherwise abstain; one share, at most one pending
-or open position; exit 50 events after the decision; aggressive fills at the
-best quote at order arrival; symmetric entry and exit latency of 0, 1 or 10 ms
-with shared period deadlines; no explicit fees. Each round trip is decomposed
-as
+The backtest: buy if score > 0.3, short if < −0.3, else nothing; one share,
+one position at a time; exit 50 events after entry at the best opposite
+quote; latency 0, 1 or 10 ms with the book read at arrival time; no fees.
+Every round trip is decomposed as
 
-`net PnL = side × q × (exit mid − entry mid) − q × (entry spread + exit spread) / 2 − fees`
+```
+net = side * (exit mid − entry mid) − (entry spread + exit spread) / 2 − fees
+```
 
-and the decomposition is checked against the recorded execution PnL.
+and the decomposition is checked against the actual fill prices.
 
-| Test block, boosting strategy | 0 ms | 1 ms | 10 ms |
+| Test block | 0 ms | 1 ms | 10 ms |
 |---|---:|---:|---:|
-| Completed round trips | 1,224 | 1,185 | 1,094 |
+| Round trips | 1,224 | 1,185 | 1,094 |
 | Mid-price PnL ($) | 20.2 | 16.2 | 13.9 |
 | Spread cost ($) | 124.6 | 121.0 | 112.4 |
 | Net PnL ($) | −104.4 | −104.8 | −98.5 |
-| Mean net PnL per trade ($) | −0.085 | −0.088 | −0.090 |
+| Net per trade ($) | −0.085 | −0.088 | −0.090 |
 
-At zero latency the favourable mid movement is 1.65 cents per trade against
-10.2 cents of spread cost. Latency changes which trades occur, so the columns
-compare whole strategies rather than the same orders delayed; the smaller loss
-at 10 ms comes with fewer trades and a worse mean.
+So 1.65 cents of favourable move per trade against 10.2 cents of spread.
+Latency changes which trades happen, not really the outcome.
 
 ![PnL decomposition](reports/figures/pnl_decomposition.png)
 
-### Uncertainty
+### Are these numbers significant?
 
-Neighbouring labels overlap and trades cluster in time, so plain standard
-errors would be too small. `uncertainty_v1` refits the boosting model and
-resamples with a moving block bootstrap: blocks of consecutive events for the
-decile means (500, 2,000 and 5,000 events; the intervals barely change) and
-blocks of 25 consecutive trades for the backtest, 1,000 resamples, 95%
-percentile intervals.
+Labels overlap (50-event windows) and trades cluster, so plain standard
+errors are too small. I used a moving block bootstrap instead: blocks of
+consecutive events for the decile means (500, 2000 and 5000 events, the
+intervals barely move) and blocks of 25 consecutive trades for the
+backtest, 1000 resamples, 95% percentile intervals.
 
-| Quantity | Estimate | 95% interval |
+| | Estimate | 95% CI |
 |---|---:|---:|
-| Validation, decile 10 mean move (cents) | +2.31 | [+1.79, +2.77] |
-| Validation, decile 1 mean move (cents) | −1.92 | [−2.35, −1.53] |
-| Validation, favourable move in the two extreme deciles (cents) | 2.11 | [1.82, 2.43] |
-| Test, mid-price PnL, 1,224 trades ($) | 20.2 | [17.1, 23.4] |
+| Validation, top decile mean move (cents) | +2.31 | [+1.79, +2.77] |
+| Validation, bottom decile mean move (cents) | −1.92 | [−2.35, −1.53] |
+| Test, mid-price PnL over 1,224 trades ($) | 20.2 | [17.1, 23.4] |
 | Test, spread cost ($) | 124.6 | [113.1, 136.8] |
 | Test, net PnL ($) | −104.4 | [−114.9, −94.3] |
 
-The signal is distinguishable from zero, and so is the loss. The two cannot be
-closed by a threshold or a seed: on this day and at this horizon, the
-directional edge is an order of magnitude smaller than the cost of crossing
-the spread twice.
+The signal is clearly non-zero and so is the loss. No threshold or seed
+closes a gap of that size.
 
-### Does the better model change the execution picture?
+### Does the better model help?
 
-`signal_v1` repeats the decile and backtest analysis on validation for the
-14-feature reference and the 33-feature model, both boosting.
+Same analysis with the 33-feature model, validation only:
 
 | Validation, boosting | 14 features | 33 features |
 |---|---:|---:|
-| Favourable move in the two extreme deciles (cents, 95% interval) | 2.11 [1.82, 2.43] | 2.62 [2.29, 2.92] |
-| Decile 10 / decile 1 mean move (cents) | +2.31 / −1.92 | +2.66 / −2.59 |
-| Backtest, threshold 0.3: trades, mid-price PnL per trade | 1,039, 1.8 c | 1,229, 2.1 c |
-| Backtest, threshold 0.6: trades, mid-price PnL per trade | 122, 2.7 c | 236, 3.8 c |
+| Mean move in the two extreme deciles (cents) | 2.11 [1.82, 2.43] | 2.62 [2.29, 2.92] |
+| Backtest thr 0.3: trades, mid PnL/trade | 1,039, 1.8 c | 1,229, 2.1 c |
+| Backtest thr 0.6: trades, mid PnL/trade | 122, 2.7 c | 236, 3.8 c |
 | Spread cost per trade (cents) | 13.4 | 13.2 |
 
-The gain in log loss is a gain in cents too, about 25% more favourable
-movement in the extreme deciles, and the full model is better at every
-threshold. It is still nowhere near the spread: at the most selective
-threshold, 3.8 cents of signal against 13 cents of cost. Improving the
-prediction was worth doing and does not rescue aggressive execution at this
-horizon, which is the reason the next step is passive execution rather than
-a bigger model.
+Better model, ~25% more signal in cents, better at every threshold. Still
+3.8 cents against 13 at the most selective threshold. That's why I went to
+passive execution next instead of a bigger model.
 
-## Five names, one day
+## Same thing on four other names
 
-The other four free LOBSTER samples cover the same session (21 June 2012,
-level 10): AMZN, GOOG, INTC and MSFT. `run_experiment.py --ticker` runs the
-unchanged pipeline on each of them, with the model and strategy choices
-fixed on AAPL, so each name's test block is a genuine one-time held-out
-evaluation. They fall into two microstructure regimes.
+LOBSTER also gives AMZN, GOOG, INTC and MSFT for the same day. I ran the
+unchanged pipeline on each (`--ticker`), keeping all choices from AAPL, so
+each test block is a proper one-shot held-out.
 
 | | GOOG | AAPL | AMZN | MSFT | INTC |
 |---|---:|---:|---:|---:|---:|
@@ -224,163 +201,135 @@ evaluation. They fall into two microstructure regimes.
 | Mid unchanged after 50 events | 6% | 8% | 15% | 81% | 87% |
 | Boosting test log loss vs prior | −4% | −3% | −4% | −27% | −26% |
 | Extreme deciles, mean move (cents) | 3.0 | 2.1 | 1.4 | 0.27 | 0.19 |
-| Test backtest: mid PnL per trade (cents) | 2.0 | 1.6 | 1.1 | 0.18 | 0.14 |
-| Test backtest: spread cost per trade (cents) | 22.0 | 10.2 | 10.4 | 1.4 | 1.3 |
-| Cost over signal | ×11 | ×6 | ×10 | ×8 | ×9 |
+| Test backtest, mid PnL per trade (cents) | 2.0 | 1.6 | 1.1 | 0.18 | 0.14 |
+| Test backtest, spread per trade (cents) | 22.0 | 10.2 | 10.4 | 1.4 | 1.3 |
+| Cost / signal | ×11 | ×6 | ×10 | ×8 | ×9 |
 
 ![Five tickers](reports/figures/tickers.png)
 
-GOOG, AAPL and AMZN are small-tick names: the spread is 12 to 27 ticks, the
-touch holds about a hundred shares, and the mid-price moves within 50
-events almost every time. MSFT and INTC are large-tick names: the spread is
-one tick three quarters of the time, the touch holds twelve thousand
-shares, and the mid-price stays put 80 to 87% of the time. On the large-tick
-names the log loss gain over the prior is much larger, mostly because "the
-mid will not move" is predictable from queue depth; the directional part is
-smaller in cents but cleaner, with the top decile going up half the time
-and down 3% of the time.
+Two very different regimes. GOOG/AAPL/AMZN are small-tick stocks: spread of
+12 to 27 ticks, ~100 shares at the touch, the mid moves all the time.
+MSFT/INTC are large-tick: spread of one tick 77% of the time, ~12,000
+shares at the touch, the mid doesn't move 80% of the time. On the large-tick
+names the log loss gain looks huge but it's mostly "the mid won't move",
+which you can read off the queue depth. The directional part is tiny in
+cents but cleaner (top decile: up 50% of the time, down 3%).
 
-The execution conclusion is identical across all five: the spread paid per
-aggressive round trip is six to eleven times the mid-price movement the
-signal captures. The ratio does not depend on the tick regime, which is
-what one would expect if both the signal and the cost scale with the
-spread. This is transfer across names on one day, not evidence about other
-days.
+The execution conclusion is the same on all five: spread cost is 6 to 11
+times the captured move, whatever the tick regime. Makes sense if both the
+signal and the cost scale with the spread. This is transfer across names on
+one day though, not across days.
 
 ## Passive execution
 
-`lob/passive.py` replays the message stream around each decision to ask what
-a limit order would have done. The assumptions are listed at the top of the
-file; the ones that matter are: zero latency; the order either joins the
-back of the visible queue at the best quote or improves the quote by one
-tick (an empty queue in front, possible because the spread averages 13
-ticks); only visible executions on our side and at our price consume the
-queue ahead, and cancellations are assumed to sit behind us; a trade on our
-side at a worse price than ours would have hit us first; unfilled orders are
-cancelled 50 events after the decision; a filled position is closed
-aggressively at that same event. Each filled round trip decomposes as
+`lob/passive.py` replays the message stream after each decision to see
+what a limit order would have done. Assumptions (all listed at the top of
+the file): zero latency; the order either joins the visible queue at the
+best quote or improves it by one tick (queue empty in front, possible
+because the spread is 13 ticks on AAPL); only visible executions on our
+side at our price eat the queue in front of us, cancellations are assumed
+to be behind us; a trade on our side at a worse price than ours would have
+hit us first; unfilled orders are cancelled after 50 events; filled ones
+are closed aggressively at that same event. So the entry earns ~half a
+spread and the exit pays ~half a spread:
 
-`net PnL = mid-price move + (decision mid − limit price) − exit spread / 2 − fees`
-
-so the entry earns about half a spread and the exit pays about half a spread.
+```
+net = mid move + (decision mid − limit price) − exit spread / 2 − fees
+```
 
 ![Passive execution](reports/figures/passive_execution.png)
 
-| Validation, 33 features, threshold 0.3 | Join the queue | Improve one tick | Aggressive |
+| Validation, 33 features, thr 0.3 | Join queue | Improve 1 tick | Aggressive |
 |---|---:|---:|---:|
 | Decisions | 1,229 | 1,228 | 1,229 |
 | Filled | 8.6% | 15.1% | 100% |
 | Median time to fill (s) | 1.9 | 1.5 | 0 |
-| Mid-price move when filled (cents) | −3.8 | −3.2 | |
-| Mid-price move when not filled (cents) | +2.7 | +3.1 | |
+| Mid move when filled (cents) | −3.8 | −3.2 | |
+| Mid move when not filled (cents) | +2.7 | +3.1 | |
 | Entry edge per fill (cents) | +4.4 | +3.6 | −6.6 |
 | Exit cost per fill (cents) | −6.3 | −6.1 | −6.6 |
 | Net per fill (cents) | −5.8 | −5.7 | −11.1 |
 | Net per decision (cents) | −0.5 | −0.9 | −11.1 |
 
-This is adverse selection in its plainest form. The orders that get filled
-are the ones where the mid-price then moves against the position by 3 to 4
-cents; the orders that do not get filled are the ones where the signal was
-right, and the price moved away by about 3 cents. The half spread earned at
-entry is smaller than the half spread paid at exit, because fills happen
-when the spread is narrow, and the adverse move takes the rest. Improving
-the quote by a tick roughly doubles the fill rate and costs a tick of edge;
-it does not change the sign. The picture is the same with the 14-feature
-model and at every threshold (`reports/passive_v1`).
+This is textbook adverse selection. The orders that get filled are the ones
+where the mid then moves against us by 3 to 4 cents; the ones that don't
+get filled are exactly the ones where the model was right (price ran away
+by ~3 cents). The half spread you earn at entry is smaller than the half
+spread you pay at exit because you get filled when the spread is narrow,
+and the adverse move eats the rest. Improving by one tick doubles the fill
+rate and costs a tick, same sign. Same story with the 14-feature model and
+at every threshold.
 
-Passive entry therefore loses about ten times less per decision than
-aggressive entry, but it still loses, and it captures almost none of the
-signal: the 85% of decisions that go unfilled are precisely the ones the
-model got right. With this signal and this horizon, the best of the three
-actions studied so far, aggressive, passive or abstain, is abstain.
+So passive loses ~10× less per decision than aggressive, but still loses,
+and it captures almost none of the signal since 85% of the decisions never
+fill. With this signal and this horizon, out of aggressive / passive / do
+nothing, the best action is do nothing.
 
-What that leaves open is the two-sided case: resting on both sides and
-exiting passively as well, which is the market-maker's problem. There the
-question is not whether the signal pays for crossing the spread but whether
-it reduces the adverse selection a quoter suffers, by skewing or pulling
-quotes when the model expects a move. That is the next experiment.
+The thing that's left open is quoting on both sides and exiting passively
+too, i.e. the market maker's problem, where the question becomes whether
+the signal reduces adverse selection rather than whether it pays for the
+spread. I haven't done that.
 
-## Code layout
+## Code
 
-| File | Responsibility |
+| File | |
 |---|---|
-| `run_experiment.py` | Parse arguments and dispatch one named experiment |
-| `lob/experiments.py` | `ExperimentConfig`, shared preparation, the experiments, manifests |
-| `lob/data.py` | Read and align LOBSTER files, validate snapshots |
-| `lob/features.py` | Causal feature calculations |
-| `lob/labels.py` | Integer-comparison direction labels |
-| `lob/splits.py` | Purged chronological splits and usable-row masks |
-| `lob/models.py` | Model fitting, including epoch-wise MLP training |
-| `lob/evaluation.py` | Classification diagnostics, score bins, PnL decomposition |
-| `lob/execution.py`, `lob/backtest.py` | Aggressive execution and non-overlapping strategy simulation |
-| `lob/passive.py` | Limit-order replay: queue position, fills, cancellation, PnL decomposition |
-| `lob/message_features.py` | Trade, order-flow, activity and depth features from the message file |
-| `lob/uncertainty.py` | Moving block bootstrap |
-| `make_figures.py` | Figures from saved CSVs, no training required |
+| `run_experiment.py` | CLI, picks an experiment and a ticker |
+| `lob/experiments.py` | config, shared data prep, the experiments, run manifests |
+| `lob/data.py` | LOBSTER loaders, alignment, book validation |
+| `lob/features.py` | book features |
+| `lob/message_features.py` | trades / flow / activity / depth features from the message file |
+| `lob/labels.py` | labels |
+| `lob/splits.py` | purged chronological splits |
+| `lob/models.py` | model fitting, epoch-wise MLP |
+| `lob/evaluation.py` | metrics, score bins, PnL decomposition |
+| `lob/execution.py`, `lob/backtest.py` | aggressive fills, latency, backtest |
+| `lob/passive.py` | limit order replay |
+| `lob/uncertainty.py` | moving block bootstrap |
+| `make_figures.py` | figures from the saved CSVs |
 
-Input validation is deliberately strict: crossed books, non-monotonic
-timestamps, sentinel prices, insufficient exit liquidity and future columns
-used as features all raise rather than being silently handled. `pytest` runs
-127 tests over features, labels, splits, execution, latency, the limit-order replay and the bootstrap.
+Input checks are strict on purpose (crossed books, non-monotonic times,
+sentinel prices, insufficient liquidity at exit, future columns used as
+features all raise). 127 tests, `python -m pytest -q`.
 
-## Setup and data
+## Running it
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-lock.txt   # reference versions (Python 3.12)
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-lock.txt      # Python 3.12, versions used for the numbers above
 ```
-
-`requirements.txt` lists the unpinned dependencies; expect differences in the
-third decimal of the boosting metrics across scikit-learn versions.
 
 Download the level-10 samples from
-[LOBSTER](https://lobsterdata.com/info/DataSamples.php) (AAPL for the main
-results; AMZN, GOOG, INTC and MSFT for the cross-name section) and place
-the files in `data/raw/`:
-
-```text
-AAPL_2012-06-21_34200000_57600000_message_10.csv
-AAPL_2012-06-21_34200000_57600000_orderbook_10.csv
-```
-
-Raw data stays out of Git. The effective configuration is `ExperimentConfig`
-in `lob/experiments.py`.
-
-## Running experiments
+[lobsterdata.com](https://lobsterdata.com/info/DataSamples.php) into
+`data/raw/` (AAPL for the main results, the other four for the last
+section). The raw files are not in git.
 
 ```bash
-python run_experiment.py baseline_v1      # models, diagnostics, backtests, the one test evaluation
-python run_experiment.py mlp_multiseed    # MLP on validation, 5 seeds
-python run_experiment.py uncertainty_v1   # block bootstrap intervals
-python run_experiment.py features_v1      # message-file feature families, ablations, permutation importance
-python run_experiment.py signal_v1        # signal in cents, reference versus full feature set (validation)
-python run_experiment.py passive_v1       # limit-order replay versus aggressive execution (validation)
-python run_experiment.py baseline_v1 --ticker MSFT --output-dir reports/baseline_MSFT   # any of the five samples
-python make_figures.py                    # figures from the reference folders
-python -m pytest -q
+python run_experiment.py baseline_v1        # models, backtests, the one test evaluation
+python run_experiment.py mlp_multiseed
+python run_experiment.py uncertainty_v1
+python run_experiment.py features_v1
+python run_experiment.py signal_v1
+python run_experiment.py passive_v1
+python run_experiment.py baseline_v1 --ticker MSFT --output-dir reports/baseline_MSFT
+python make_figures.py
 ```
 
-Each run creates a new directory under `reports/runs/` (or the path given with
-`--output-dir`, which must not exist) containing `manifest.json` with the
-configuration, input and source hashes, dependency versions and git revision,
-`dataset_summary.json`, fitted estimator parameters, per-scenario trade and
-order logs, a `status.json`, and the metric CSVs. The reference folders are
-never overwritten. `make_figures.py` accepts `--baseline-dir`, `--mlp-dir`, `--uncertainty-dir`,
-`--features-dir` and `--passive-dir` to render a different run, and writes `figure_sources.json`
-with the hashes of the CSVs it used.
+Each run writes to a new folder (`reports/runs/...` or `--output-dir`, which
+must not exist yet) with a `manifest.json` (config, hashes of inputs and
+source files, package versions, git commit), the model parameters, trade
+logs and the metric CSVs. The reference folders in `reports/` are never
+overwritten. Boosting numbers can differ in the third decimal between
+scikit-learn versions.
 
-## Limitations and next steps
+## Limitations
 
-One day: every test block shares its session with its training block, and
-the five names share the date, so the results say nothing about other
-dates. Execution is
-simplified to full fills of one share at the best level, with no impact, no
-partial fills and no short-borrow cost. The limit-order replay assumes
-cancellations sit behind our order, ignores hidden liquidity at our price,
-has no partial fills and no latency on placement or cancellation; it also
-cannot know how other participants would have reacted to our order.
+One day. All test blocks share their session with training, and the five
+names share the date, so nothing here says anything about other days.
+Execution is one share at the best level, no impact, no partial fills, no
+borrow cost. The limit order replay assumes cancellations are behind us,
+ignores hidden liquidity at our price, has no latency, and obviously can't
+know how other people would have reacted to our order being there.
 
-Planned, in order: two-sided passive quoting with the signal used to skew
-or pull quotes; event versus clock-time horizons and decisions after estimated costs;
-more sessions with a fresh reserved test block.
+If I continue: two-sided passive quoting, horizons in seconds instead of
+events, and more days (which needs a LOBSTER subscription).

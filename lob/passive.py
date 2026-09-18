@@ -1,27 +1,20 @@
-"""Passive (limit order) execution on a replayed LOBSTER session.
+"""Limit order replay on a LOBSTER session.
 
-Assumptions, all deliberate and all optimistic or conservative in a known
-direction:
+Assumptions:
+- zero latency for placing and cancelling
+- the order sits at the best quote (improve_ticks=0, back of the visible
+  queue) or improve_ticks inside the spread (nothing in front)
+- only visible executions (type 4) on our side at our price eat the queue
+  in front of us; cancellations are assumed to be behind us (conservative)
+- a visible execution on our side at a worse price than ours would have hit
+  us first -> fill. Standard replay assumption, ignores that our order could
+  have changed what others do
+- all-or-nothing fills (quantity is 1 share everywhere anyway)
+- unfilled after `horizon` events -> cancelled. Filled -> closed at the best
+  opposite quote at that same event, so exit pays half a spread and entry
+  earns (decision mid - limit price)
 
-- Zero latency for placement and cancellation.
-- The order rests at the best quote (improve_ticks = 0, joining the back of
-  the visible queue) or improve_ticks inside the spread (an empty queue).
-- Only visible executions (event type 4) on our side and at our price
-  consume the queue ahead of us. Cancellations are assumed to sit behind us,
-  which is the conservative choice.
-- A visible execution on our side at a price worse than ours would have hit
-  our order first, so it fills us. This is the standard replay assumption
-  and ignores the fact that our order might have changed other traders'
-  behaviour.
-- Fills are all-or-nothing for the requested quantity, which is one share in
-  every experiment here.
-- The order is cancelled `horizon` events after the decision if unfilled. A
-  filled position is closed aggressively at the best opposite quote at that
-  same event, so the exit pays half a spread and the entry earns the
-  distance between the decision mid-price and the limit price.
-
-Prices in `events` are LOBSTER integers (dollars times 10,000); outputs are
-in dollars.
+Prices in `events` are LOBSTER ints (dollars * 10_000), outputs in dollars.
 """
 
 import numpy as np
@@ -41,8 +34,8 @@ def simulate_passive_round_trip(
 ) -> dict:
     """Place one limit order at decision_index and replay the next horizon events.
 
-    Returns a record whether or not the order is filled. Unfilled orders keep
-    the mid-price move over the horizon so the fill selection can be studied.
+    Returns a dict in both cases (filled or not). Unfilled orders still get the
+    mid move over the horizon, needed to look at the fill selection.
     """
 
     for name, value in (
@@ -194,11 +187,11 @@ def run_passive_backtest(
     quantity: int = 1,
     fee_per_share: float = 0.0,
 ) -> pd.DataFrame:
-    """Run the passive strategy with at most one resting order or open position.
+    """Passive strategy, one resting order or open position at a time.
 
-    Entry rule and event bookkeeping match `run_backtest`: an order is placed
-    when the score strictly exceeds the threshold, and the next decision is
-    allowed only after the cancel-or-exit event.
+    Same entry rule and bookkeeping as run_backtest: order placed when the
+    score is beyond the threshold, next decision only after the cancel/exit
+    event.
     """
 
     if not events.index.equals(pd.RangeIndex(len(events))):

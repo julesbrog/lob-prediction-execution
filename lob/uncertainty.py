@@ -7,11 +7,10 @@ def moving_block_indices(
     block_size: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Draw one moving-block bootstrap resample of positions 0..n-1.
+    """One moving block bootstrap resample of positions 0..n-1.
 
-    Blocks of consecutive positions are drawn with replacement from all
-    windows of length block_size, then concatenated and truncated to the
-    original length. Temporal dependence within a block is preserved.
+    Blocks of block_size consecutive positions drawn with replacement,
+    concatenated, truncated to n.
     """
 
     if isinstance(n_observations, (bool, np.bool_)) or not isinstance(
@@ -50,13 +49,10 @@ def block_bootstrap(
     confidence: float = 0.95,
     random_state: int = 0,
 ) -> dict[str, float]:
-    """Percentile confidence interval of a statistic on a time-ordered array.
+    """Percentile CI of statistic(values) with a moving block bootstrap.
 
-    values must be in temporal order along the first axis; a two-dimensional
-    array is resampled by rows. statistic maps the resampled array to a float.
-    Returns the point estimate on the original data, the interval bounds, the
-    bootstrap standard error and the fraction of resamples with a strictly
-    positive statistic.
+    values must be in time order (rows, if 2-D). Returns the point estimate,
+    the CI bounds, the bootstrap std error and the fraction of resamples > 0.
     """
 
     values = np.asarray(values, dtype=float)
@@ -113,11 +109,10 @@ def bootstrap_group_means(
     confidence: float = 0.95,
     random_state: int = 0,
 ) -> pd.DataFrame:
-    """Block-bootstrap the mean of values within each group.
+    """Block bootstrap of the mean of values within each group.
 
-    Both series must share an index in temporal order. Blocks are drawn on
-    the full sequence, so group membership is resampled together with the
-    values and the dependence between neighbouring events is kept.
+    Blocks are drawn on the full sequence so group membership is resampled
+    together with the values.
     """
 
     if not isinstance(values, pd.Series) or not isinstance(groups, pd.Series):

@@ -623,11 +623,10 @@ def experiment_mlp_multiseed(data: dict, config: ExperimentConfig, output_dir: P
     print(f"\nResults saved to: {output_dir}")
 
 def experiment_uncertainty_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
-    """Block-bootstrap intervals for the decile means and the backtest PnL.
+    """Block bootstrap CIs for the decile means and the backtest PnL.
 
-    Refits the boosting model, then resamples blocks of consecutive events
-    (decile analysis) or consecutive trades (backtest) so that temporal
-    dependence, including overlapping labels, is preserved.
+    Blocks of consecutive events (deciles) or consecutive trades (backtest),
+    so the overlap between labels is kept in the resamples.
     """
 
     events = data["events"]
@@ -821,10 +820,9 @@ def build_feature_families(data: dict, config: ExperimentConfig) -> tuple[pd.Dat
 
 
 def experiment_features_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
-    """Add feature families one at a time, ablate them, and rank by permutation.
+    """Feature family ablations + permutation importance, validation only.
 
-    Every feature set is evaluated on the same validation rows. The noise
-    column is a control: a family that does not beat it adds nothing.
+    All feature sets use the same rows. The noise column is the control.
     """
 
     targets = data["targets"]
@@ -955,11 +953,10 @@ def experiment_features_v1(data: dict, config: ExperimentConfig, output_dir: Pat
 
 
 def experiment_signal_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
-    """Does the 33-feature model move the signal in cents? Validation only.
+    """Signal in cents for the 14-feature and 33-feature models, validation only.
 
-    For the 14-feature reference and the full feature set: decile means of
-    the future mid-price change with block bootstrap intervals, aggressive
-    round-trip PnL by decile, and a zero-latency backtest across thresholds.
+    Decile means with block bootstrap CIs, aggressive round trips by decile,
+    zero-latency backtest over a few thresholds.
     """
 
     events = data["events"]
@@ -1105,12 +1102,11 @@ def experiment_signal_v1(data: dict, config: ExperimentConfig, output_dir: Path)
 
 
 def experiment_passive_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
-    """Passive versus aggressive execution of the same signals, validation only.
+    """Passive vs aggressive execution on the same decisions, validation only.
 
-    For each feature set, threshold and placement (join the queue or improve
-    by one tick): fill rate, PnL decomposition of filled orders, the
-    mid-price move conditional on being filled or not (adverse selection),
-    and the aggressive strategy on the same decisions for comparison.
+    For each feature set / threshold / placement: fill rate, PnL decomposition
+    of the fills, mid move conditional on filled or not, and the aggressive
+    result on the same decisions.
     """
 
     events = data["events"]

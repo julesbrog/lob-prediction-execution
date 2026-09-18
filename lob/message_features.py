@@ -1,9 +1,9 @@
-"""Causal features built from the LOBSTER message file and absolute depth.
+"""Features from the LOBSTER message file, plus absolute depth.
 
-LOBSTER event types: 1 submission, 2 partial cancellation, 3 deletion,
-4 visible execution, 5 hidden execution, 7 trading halt. The direction
-column is the side of the limit order (1 buy, -1 sell). An execution of a
-sell limit order was initiated by a buyer, so its signed volume is positive.
+Event types: 1 submission, 2 partial cancel, 3 deletion, 4 visible
+execution, 5 hidden execution, 7 halt. direction is the side of the limit
+order (1 buy, -1 sell), so an execution with direction -1 was initiated by a
+buyer and counts as positive signed volume.
 """
 
 import numpy as np
@@ -49,11 +49,7 @@ def compute_trade_features(
     events: pd.DataFrame,
     windows: tuple[int, ...] = (10, 50, 100),
 ) -> pd.DataFrame:
-    """Signed and total executed volume over trailing event windows.
-
-    Visible and hidden executions both count. A buyer-initiated trade
-    executes a sell limit order (direction -1) and is counted positive.
-    """
+    """Signed and total executed volume over trailing windows (visible + hidden)."""
 
     _check_messages(events)
     _check_windows(windows)
@@ -76,10 +72,9 @@ def compute_flow_features(
     events: pd.DataFrame,
     windows: tuple[int, ...] = (10, 50, 100),
 ) -> pd.DataFrame:
-    """Net limit-order flow: signed submissions minus signed cancellations.
+    """Signed submissions minus signed cancellations, and cancelled volume.
 
-    Submitted buy volume and cancelled sell volume push the flow up; the
-    opposite pushes it down. Executions are left to the trade features.
+    Executions are handled in compute_trade_features.
     """
 
     _check_messages(events)
@@ -170,7 +165,7 @@ def compute_noise_feature(
     index: pd.Index,
     random_state: int = 0,
 ) -> pd.Series:
-    """Standard normal noise, independent of the data, as a control feature."""
+    """N(0,1) noise column, used as a control in the ablations."""
 
     rng = np.random.default_rng(random_state)
 
