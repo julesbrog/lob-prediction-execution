@@ -1,0 +1,794 @@
+"""Named research experiments; existing model and simulator implementations are reused."""
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from importlib.metadata import version, PackageNotFoundError
+from pathlib import Path
+import hashlib
+import json
+import platform
+import subprocess
+import uuid
+
+import numpy as np
+import pandas as pd
+
+from lob.backtest import run_backtest, run_backtest_with_latency
+from lob.data import (align_events, compute_horizon_duration, load_messages,
+                      load_orderbook, validate_book)
+from lob.evaluation import (analyze_aggressive_execution, analyze_score_bins,
+                           decompose_trade_pnl, evaluate_model,
+                           print_classification_diagnostics)
+from lob.features import (build_basic_features, compute_depth_imbalance,
+                          compute_event_ofi, compute_rolling_features,
+                          compute_rolling_ofi)
+from lob.models import fit_baseline, fit_boosting, fit_logistic, fit_mlp
+from lob.labels import make_targets
+from lob.splits import make_temporal_splits, prepare_datasets
+from lob.uncertainty import block_bootstrap, bootstrap_group_means
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    project_root: Path
+    file_prefix: str = "AAPL_2012-06-21_34200000_57600000"
+    n_levels: int = 10
+    horizon: int = 50
+    epsilon_units: int = 0
+    windows: tuple[int, ...] = (10, 50, 100)
+    depths: tuple[int, ...] = (5, 10)
+    train_fraction: float = 0.6
+    val_fraction: float = 0.2
+    signal_threshold: float = 0.3
+    trade_quantity: int = 1
+    fee_per_share: float = 0.0
+    latency_scenarios: tuple[float, ...] = (0.0, 0.001, 0.010)
+    mlp_seeds: tuple[int, ...] = (0, 1, 2, 3, 42)
+    mlp_max_epochs: int = 100
+    mlp_patience: int = 10
+    # Block bootstrap: blocks of consecutive events or consecutive trades.
+    event_block_sizes: tuple[int, ...] = (500, 2_000, 5_000)
+    trade_block_size: int = 25
+    n_resamples: int = 1_000
+
+    @property
+    def data_dir(self):
+        return self.project_root / "data" / "raw"
+
+    @property
+    def feature_columns(self):
+        return [
+            "spread", "imbalance_1",
+            *[f"imbalance_{depth}" for depth in self.depths],
+            "weighted_mid_offset",
+            *[f"{feature}_{window}" for window in self.windows
+              for feature in ("log_return", "realized_vol")],
+        ]
+
+    @property
+    def ofi_feature_columns(self):
+        return self.feature_columns + [f"ofi_{w}" for w in self.windows]
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def save_manifest(config, experiment, output_dir):
+    dependencies = {}
+    for package in ("numpy", "pandas", "scipy", "scikit-learn", "matplotlib"):
+        try:
+            dependencies[package] = version(package)
+        except PackageNotFoundError:
+            dependencies[package] = None
+    root = config.project_root
+    files = [root / "run_experiment.py", *sorted((root / "lob").glob("*.py"))]
+    sources = {str(p.relative_to(root)): sha256_file(p) for p in files if p.is_file()}
+    inputs = {}
+    for kind in ("message", "orderbook"):
+        p = config.data_dir / f"{config.file_prefix}_{kind}_{config.n_levels}.csv"
+        inputs[p.name] = {"sha256": sha256_file(p), "bytes": p.stat().st_size}
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root,
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=root,
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        ).strip())
+    except (OSError, subprocess.SubprocessError):
+        revision, dirty = None, None
+    write_json(output_dir / "manifest.json", {
+        "experiment": experiment,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "configuration": asdict(config),
+        "feature_columns": config.feature_columns,
+        "ofi_feature_columns": config.ofi_feature_columns,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "dependencies": dependencies,
+        "git_commit": revision, "git_dirty": dirty,
+        "source_sha256": sources, "inputs": inputs,
+        "protocol": {
+            "fit_data": "train only",
+            "mlp_selection": "minimum validation log loss; no test evaluation",
+            "test": "baseline_v1 reproduces the previously disclosed test experiment",
+            "fills": "best level only, no impact, instantaneous acknowledgements",
+        },
+    })
+
+
+def save_model_parameters(output_dir, name, model):
+    # Source hashes and versions in the manifest complement estimator parameters.
+    write_json(output_dir / f"parameters_{name}.json", model.get_params(deep=True))
+
+def load_events(config: ExperimentConfig) -> pd.DataFrame:
+    """Load, align and validate one LOBSTER session."""
+
+    messages = load_messages(config.data_dir / f"{config.file_prefix}_message_{config.n_levels}.csv")
+    book = load_orderbook(
+        config.data_dir / f"{config.file_prefix}_orderbook_{config.n_levels}.csv",
+        n_levels=config.n_levels,
+    )
+    events = align_events(messages, book)
+
+    print(f"Dataset: {config.file_prefix}")
+    print(f"Events: {len(events):,} | Book levels: {config.n_levels}")
+
+    checks = validate_book(book, n_levels=config.n_levels)
+
+    print("\nOrder book checks:")
+    print(checks.sum().to_string())
+
+    if checks.any().any():
+        raise ValueError("Order book flags detected; inspect before proceeding")
+
+    return events
+
+
+def build_features(events: pd.DataFrame, config: ExperimentConfig) -> pd.DataFrame:
+    """Build the level-one, depth, rolling and OFI features."""
+
+    features = build_basic_features(events)
+
+    for depth in config.depths:
+        features[f"imbalance_{depth}"] = compute_depth_imbalance(
+            events,
+            n_levels=depth,
+        )
+
+    historical = compute_rolling_features(features["mid_price"], windows=config.windows)
+    features = features.join(historical)
+
+    event_ofi = compute_event_ofi(events)
+    rolling_ofi = compute_rolling_ofi(event_ofi, windows=config.windows)
+
+    if not rolling_ofi.index.equals(features.index):
+        raise ValueError("OFI and other features must have the same index")
+
+    features = features.join(rolling_ofi)
+
+    print("\nRolling OFI — missing values:")
+    print(rolling_ofi.isna().sum().to_string())
+
+    return features
+
+
+def prepare_experiment(config: ExperimentConfig) -> dict:
+    """Return events, features, targets, splits and the two dataset variants."""
+
+    events = load_events(config)
+    features = build_features(events, config)
+
+    targets = make_targets(
+        bid_raw=events["bid_price_1"],
+        ask_raw=events["ask_price_1"],
+        horizon=config.horizon,
+        epsilon_units=config.epsilon_units,
+    )
+
+    splits = make_temporal_splits(
+        n_events=len(events),
+        horizon=config.horizon,
+        train_fraction=config.train_fraction,
+        val_fraction=config.val_fraction,
+    )
+
+    datasets = prepare_datasets(features, targets, splits, config.feature_columns)
+    datasets_ofi = prepare_datasets(features, targets, splits, config.ofi_feature_columns)
+
+    # Both variants must use identical observations and labels.
+    for name in splits:
+        X_reference, y_reference = datasets[name]
+        X_with_ofi, y_with_ofi = datasets_ofi[name]
+
+        if not X_reference.index.equals(X_with_ofi.index):
+            raise ValueError(
+                f"{name}: reference and OFI datasets have different events"
+            )
+
+        if not y_reference.equals(y_with_ofi):
+            raise ValueError(
+                f"{name}: reference and OFI datasets have different labels"
+            )
+
+        np.testing.assert_allclose(
+            X_reference.to_numpy(),
+            X_with_ofi[config.feature_columns].to_numpy(),
+        )
+
+    print(f"\nHorizon: {config.horizon} events | Epsilon: ${config.epsilon_units / 20_000:g}")
+    print("Prepared datasets:")
+
+    for name in splits:
+        X_reference, y_reference = datasets[name]
+        X_with_ofi, _ = datasets_ofi[name]
+
+        print(
+            f"  {name}: {len(y_reference):,} observations | "
+            f"reference: {X_reference.shape[1]} features | "
+            f"with OFI: {X_with_ofi.shape[1]} features"
+        )
+
+    horizon_seconds = compute_horizon_duration(events, horizon=config.horizon)
+
+    for name in ("train", "validation"):
+        X, _ = datasets[name]
+        durations = horizon_seconds.loc[X.index]
+
+        print(f"\n{name} — duration of {config.horizon} events, in seconds:")
+        print(
+            durations.describe(percentiles=[0.01, 0.10, 0.50, 0.90, 0.99]).to_string()
+        )
+
+    return {
+        "events": events,
+        "features": features,
+        "targets": targets,
+        "splits": splits,
+        "datasets": datasets,
+        "datasets_ofi": datasets_ofi,
+        "horizon_seconds": horizon_seconds,
+    }
+
+
+def compute_scores(model, X: pd.DataFrame) -> pd.Series:
+    """Return P(up) - P(down) indexed by original event positions."""
+
+    probabilities = model.predict_proba(X)
+    classes = list(model.classes_)
+
+    return pd.Series(
+        probabilities[:, classes.index(1)] - probabilities[:, classes.index(-1)],
+        index=X.index,
+        name="score",
+    )
+
+
+def summarize_trades(trades: pd.DataFrame, label: str) -> None:
+    print(f"\n{label}")
+    print("Number of trades:", len(trades))
+
+    if trades.empty:
+        print("No trades executed.")
+        return
+
+    print(trades.head().to_string(index=False))
+    print("\nTotal gross PnL ($):", trades["gross_pnl"].sum())
+    print("Total fees ($):", trades["fees"].sum())
+    print("Total net PnL ($):", trades["net_pnl"].sum())
+    print("Mean net PnL per trade ($):", trades["net_pnl"].mean())
+    print("Winning trade fraction:", trades["net_pnl"].gt(0).mean())
+
+    print("\nNet PnL by position side (-1: short, +1: long):")
+    print(trades.groupby("side")["net_pnl"].agg(["count", "sum", "mean"]).to_string())
+
+
+def run_latency_scenarios(
+    events: pd.DataFrame,
+    scores: pd.Series,
+    first_decision_index: int,
+    label: str,
+    config: ExperimentConfig,
+    output_dir: Path,
+) -> pd.DataFrame:
+    """Backtest the same signal under each latency, with shared boundaries."""
+
+    period_end = float(events["time"].iloc[-1])
+    max_latency = max(config.latency_scenarios)
+
+    # Move slightly earlier to avoid floating-point boundary overshoots.
+    exit_send_deadline = float(np.nextafter(period_end - max_latency, -np.inf))
+    entry_cutoff_time = float(np.nextafter(exit_send_deadline - max_latency, -np.inf))
+
+    print(f"\n{label} — latency comparison")
+    print(f"Signal threshold: {config.signal_threshold}")
+    print(f"Quantity: {config.trade_quantity}")
+    print(f"Fees per share per transaction: {config.fee_per_share}")
+    print(f"Period end: {period_end:.9f} seconds")
+    print(f"Entry cutoff: {entry_cutoff_time:.9f} seconds")
+    print(f"Exit submission deadline: {exit_send_deadline:.9f} seconds")
+
+    write_json(output_dir / f"{label.lower()}_execution_boundaries.json", {
+        "first_decision_index": first_decision_index,
+        "period_end": period_end, "entry_cutoff_time": entry_cutoff_time,
+        "exit_send_deadline": exit_send_deadline,
+    })
+    rows = []
+
+    for latency in config.latency_scenarios:
+        trades, orders = run_backtest_with_latency(
+            events=events,
+            scores=scores,
+            horizon=config.horizon,
+            threshold=config.signal_threshold,
+            quantity=config.trade_quantity,
+            fee_per_share=config.fee_per_share,
+            latency_seconds=latency,
+            entry_cutoff_time=entry_cutoff_time,
+            exit_send_deadline=exit_send_deadline,
+        )
+
+        # Executed trades must respect the simulation boundaries.
+        if not orders.empty:
+            assert orders["decision_index"].ge(first_decision_index).all()
+
+        if not trades.empty:
+            assert trades["exit_time"].le(period_end).all()
+            assert trades["exit_index"].lt(len(events)).all()
+            assert trades["decision_time"].lt(entry_cutoff_time).all()
+
+        decomposition = decompose_trade_pnl(events, trades)
+
+        tag = f"{label.lower()}_latency_{latency * 1000:g}ms"
+        decomposition.to_csv(output_dir / f"{tag}_trades.csv", index=False)
+        orders.to_csv(output_dir / f"{tag}_orders.csv", index=False)
+
+        rows.append(
+            {
+                "latency_ms": latency * 1_000,
+                "submitted": len(orders),
+                "rejected": int(orders["status"].eq("entry_rejected").sum()),
+                "trades": len(trades),
+                "forced_exits": int(trades["forced_exit"].sum()),
+                "mid_pnl": decomposition["mid_pnl"].sum(),
+                "spread_cost": decomposition["spread_cost"].sum(),
+                "fees": trades["fees"].sum(),
+                "net_pnl": trades["net_pnl"].sum(),
+                "mean_net_pnl": trades["net_pnl"].mean(),
+                "win_fraction": (
+                    trades["net_pnl"].gt(0).mean() if not trades.empty else np.nan
+                ),
+            }
+        )
+
+    summary = pd.DataFrame(rows).set_index("latency_ms")
+    print(summary.round(4).to_string())
+
+    return summary
+
+
+def experiment_baseline_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
+    """Compare logistic and boosting models, reproduce the original held-out experiment."""
+
+    events = data["events"]
+    targets = data["targets"]
+    splits = data["splits"]
+    datasets = data["datasets"]
+    datasets_ofi = data["datasets_ofi"]
+
+    X_train, y_train = datasets["train"]
+    X_validation, y_validation = datasets["validation"]
+    X_train_ofi, y_train_ofi = datasets_ofi["train"]
+    X_validation_ofi, y_validation_ofi = datasets_ofi["validation"]
+
+    # 1. Fit all models using training data only.
+    baseline = fit_baseline(X_train, y_train)
+    logistic_simple = fit_logistic(X_train[["imbalance_1"]], y_train)
+    logistic_full = fit_logistic(X_train, y_train)
+    logistic_ofi = fit_logistic(X_train_ofi, y_train_ofi)
+    boosting_ofi = fit_boosting(X_train_ofi, y_train_ofi)
+
+    for name, model in (
+        ("baseline", baseline), ("logistic_simple", logistic_simple),
+        ("logistic_full", logistic_full), ("logistic_ofi", logistic_ofi),
+        ("boosting_ofi", boosting_ofi),
+    ):
+        save_model_parameters(output_dir, name, model)
+
+    # 2. Compare all five models on validation.
+    experiments = [
+        ("baseline", baseline, X_validation, y_validation),
+        ("logistic_simple", logistic_simple, X_validation[["imbalance_1"]], y_validation),
+        ("logistic_full", logistic_full, X_validation, y_validation),
+        ("logistic_ofi", logistic_ofi, X_validation_ofi, y_validation_ofi),
+        ("boosting_ofi", boosting_ofi, X_validation_ofi, y_validation_ofi),
+    ]
+
+    results = pd.DataFrame.from_dict(
+        {name: evaluate_model(model, X, y) for name, model, X, y in experiments},
+        orient="index",
+    )
+    results.index.name = "model"
+
+    print("\nValidation results:")
+    print(results.round(6).to_string())
+
+    # 3. Detailed validation diagnostics for the boosting model.
+    print("\nGradientBoosting model (14 features) — validation:")
+    print_classification_diagnostics(boosting_ofi, X_validation_ofi, y_validation_ofi)
+
+    score_summary = analyze_score_bins(boosting_ofi, X_validation_ofi, targets)
+
+    print("\nGradientBoosting model — future changes by score bin:")
+    print(score_summary.round(4).to_string())
+
+    execution_summary = analyze_aggressive_execution(
+        boosting_ofi, X_validation_ofi, events, horizon=config.horizon
+    )
+
+    print("\nGradientBoosting model — immediate execution diagnostic ($ per share):")
+    print(execution_summary.round(4).to_string())
+
+    # 4. Zero-latency validation backtest and PnL decomposition.
+    validation_scores = compute_scores(boosting_ofi, X_validation_ofi)
+
+    trades = run_backtest(
+        events=events,
+        scores=validation_scores,
+        horizon=config.horizon,
+        threshold=config.signal_threshold,
+        quantity=config.trade_quantity,
+        fee_per_share=config.fee_per_share,
+    )
+
+    summarize_trades(
+        trades,
+        f"Boosting + OFI — validation backtest (zero latency, fees {config.fee_per_share})",
+    )
+
+    decomposed_trades = decompose_trade_pnl(events, trades)
+
+    print("\nValidation — PnL decomposition ($):")
+    print(
+        decomposed_trades[["mid_pnl", "spread_cost", "fees", "reconstructed_net_pnl"]]
+        .sum()
+        .round(4)
+        .to_string()
+    )
+
+    # 5. Latency scenarios on validation, using events strictly before test.
+    val_end = splits["test"].start
+    execution_events = events.iloc[:val_end].copy()
+
+    latency_summary = run_latency_scenarios(
+        execution_events,
+        validation_scores,
+        first_decision_index=splits["validation"].start,
+        label="Validation",
+        config=config,
+        output_dir=output_dir,
+    )
+
+    # 6. Final predictive evaluation on the held-out test set.
+    X_test, y_test = datasets["test"]
+    X_test_ofi, y_test_ofi = datasets_ofi["test"]
+
+    test_experiments = [
+        ("baseline", baseline, X_test, y_test),
+        ("logistic_ofi", logistic_ofi, X_test_ofi, y_test_ofi),
+        ("boosting_ofi", boosting_ofi, X_test_ofi, y_test_ofi),
+    ]
+
+    test_results = pd.DataFrame.from_dict(
+        {name: evaluate_model(model, X, y) for name, model, X, y in test_experiments},
+        orient="index",
+    )
+    test_results.index.name = "model"
+
+    print("\nFinal test results:")
+    print(test_results.round(6).to_string())
+
+    comparison = pd.concat(
+        {"validation": results.loc[test_results.index], "test": test_results},
+        names=["split"],
+    )
+
+    print("\nValidation versus test:")
+    print(comparison.round(6).to_string())
+
+    print("\nBoosting + OFI — test classification diagnostics:")
+    print_classification_diagnostics(boosting_ofi, X_test_ofi, y_test_ofi)
+
+    # 7. Test backtest with the previously fixed strategy parameters.
+    test_scores = compute_scores(boosting_ofi, X_test_ofi)
+
+    test_latency_summary = run_latency_scenarios(
+        events,
+        test_scores,
+        first_decision_index=splits["test"].start,
+        label="Test",
+        config=config,
+        output_dir=output_dir,
+    )
+
+    execution_comparison = pd.concat(
+        {"validation": latency_summary, "test": test_latency_summary},
+        names=["split"],
+    )
+
+    print("\nValidation versus test — execution results:")
+    print(execution_comparison.round(4).to_string())
+
+    # 8. Save the experiment results.
+
+    results.to_csv(output_dir / "validation_metrics.csv")
+    test_results.to_csv(output_dir / "test_metrics.csv")
+    latency_summary.to_csv(output_dir / "validation_latency.csv")
+    test_latency_summary.to_csv(output_dir / "test_latency.csv")
+    score_summary.to_csv(output_dir / "validation_score_bins.csv")
+    execution_summary.to_csv(output_dir / "validation_execution_bins.csv")
+    decomposed_trades.to_csv(output_dir / "validation_trades.csv", index=False)
+
+    print(f"\nResults saved to: {output_dir}")
+
+
+def experiment_mlp_multiseed(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
+    """Train the MLP on the 14 features for several seeds; validation only."""
+
+    datasets_ofi = data["datasets_ofi"]
+
+    X_train_ofi, y_train_ofi = datasets_ofi["train"]
+    X_validation_ofi, y_validation_ofi = datasets_ofi["validation"]
+
+
+    records = []
+
+    for seed in config.mlp_seeds:
+        print(f"\n{'=' * 50}")
+        print(f"MLP — random_state={seed}")
+        print(f"{'=' * 50}")
+
+        mlp_model, history = fit_mlp(
+            X_train=X_train_ofi,
+            y_train=y_train_ofi,
+            X_validation=X_validation_ofi,
+            y_validation=y_validation_ofi,
+            random_state=seed,
+            max_epochs=config.mlp_max_epochs,
+            patience=config.mlp_patience,
+        )
+
+        save_model_parameters(output_dir, f"mlp_seed_{seed}", mlp_model)
+
+        metrics = evaluate_model(mlp_model, X_validation_ofi, y_validation_ofi)
+        best_row = history.loc[history["is_best"]].iloc[0]
+
+        records.append(
+            {
+                "seed": seed,
+                "best_epoch": int(best_row["epoch"]),
+                "epochs_run": len(history),
+                **metrics,
+            }
+        )
+
+        history.to_csv(output_dir / f"training_history_seed_{seed}.csv", index=False)
+
+        print(
+            f"\nSeed {seed} | best epoch: {int(best_row['epoch'])} | "
+            f"validation log loss: {metrics['log_loss']:.6f}"
+        )
+
+    seed_results = pd.DataFrame(records).set_index("seed")
+    metric_columns = ["log_loss", "accuracy", "macro_f1"]
+    summary = seed_results[metric_columns].agg(["mean", "std", "min", "max"])
+
+    print("\nMLP — validation results by seed:")
+    print(seed_results.round(6).to_string())
+
+    print("\nMLP — variability across seeds:")
+    print(summary.round(6).to_string())
+
+    seed_results.to_csv(output_dir / "validation_metrics_by_seed.csv")
+    summary.to_csv(output_dir / "validation_metrics_summary.csv")
+
+    print(f"\nResults saved to: {output_dir}")
+
+def experiment_uncertainty_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
+    """Block-bootstrap intervals for the decile means and the backtest PnL.
+
+    Refits the boosting model, then resamples blocks of consecutive events
+    (decile analysis) or consecutive trades (backtest) so that temporal
+    dependence, including overlapping labels, is preserved.
+    """
+
+    events = data["events"]
+    targets = data["targets"]
+    datasets_ofi = data["datasets_ofi"]
+
+    X_train_ofi, y_train_ofi = datasets_ofi["train"]
+    X_validation_ofi, _ = datasets_ofi["validation"]
+    X_test_ofi, _ = datasets_ofi["test"]
+
+    boosting_ofi = fit_boosting(X_train_ofi, y_train_ofi)
+    save_model_parameters(output_dir, "boosting_ofi", boosting_ofi)
+
+    # 1. Mean future change by score decile on validation, events in order.
+    validation_scores = compute_scores(boosting_ofi, X_validation_ofi)
+
+    if not validation_scores.index.is_monotonic_increasing:
+        raise ValueError("validation events must be in temporal order")
+
+    future_change_cents = targets.loc[validation_scores.index, "future_change"] * 100
+    deciles = pd.Series(
+        pd.qcut(validation_scores, q=10, labels=False, duplicates="drop") + 1,
+        index=validation_scores.index,
+        name="score_decile",
+    )
+
+    is_top = deciles.eq(deciles.max()).to_numpy()
+    is_bottom = deciles.eq(deciles.min()).to_numpy()
+    change = future_change_cents.to_numpy(dtype=float)
+
+    # Rows outside both deciles carry zero weight.
+    signed = np.where(is_top, change, np.where(is_bottom, -change, 0.0))
+    weights = (is_top | is_bottom).astype(float)
+    stacked = np.column_stack([signed, weights])
+
+    decile_tables = []
+    spread_rows = []
+
+    for block_size in config.event_block_sizes:
+        table = bootstrap_group_means(
+            values=future_change_cents,
+            groups=deciles,
+            block_size=block_size,
+            n_resamples=config.n_resamples,
+        )
+        table.insert(0, "block_size", block_size)
+        decile_tables.append(table)
+
+        spread = block_bootstrap(
+            stacked,
+            lambda sample: float(sample[:, 0].sum() / sample[:, 1].sum()),
+            block_size=block_size,
+            n_resamples=config.n_resamples,
+        )
+        spread_rows.append({"block_size": block_size, **spread})
+
+        print(
+            f"\nValidation — block size {block_size:,} events: "
+            f"top minus bottom decile = {spread['estimate']:.2f} cents "
+            f"[{spread['lower']:.2f}, {spread['upper']:.2f}]"
+        )
+
+    decile_summary = pd.concat(decile_tables).reset_index()
+    reference_block = config.event_block_sizes[len(config.event_block_sizes) // 2]
+
+    print(
+        f"\nValidation — mean future change by score decile (cents), "
+        f"blocks of {reference_block:,} events, 95% intervals:"
+    )
+    print(
+        decile_summary.loc[decile_summary["block_size"].eq(reference_block)]
+        .set_index("score_decile")
+        .round(3)
+        .to_string()
+    )
+
+    decile_summary.to_csv(output_dir / "validation_decile_intervals.csv", index=False)
+    pd.DataFrame(spread_rows).to_csv(
+        output_dir / "validation_top_minus_bottom.csv", index=False
+    )
+
+    # 2. Zero-latency backtest PnL on validation and test, trades in order.
+    backtest_rows = []
+
+    for split_name, X in (("validation", X_validation_ofi), ("test", X_test_ofi)):
+        scores = compute_scores(boosting_ofi, X)
+
+        trades = run_backtest(
+            events=events,
+            scores=scores,
+            horizon=config.horizon,
+            threshold=config.signal_threshold,
+            quantity=config.trade_quantity,
+            fee_per_share=config.fee_per_share,
+        )
+        trades = decompose_trade_pnl(events, trades)
+
+        if not trades["entry_index"].is_monotonic_increasing:
+            raise ValueError("trades must be in temporal order")
+
+        trades.to_csv(output_dir / f"{split_name}_trades.csv", index=False)
+
+        for column in ("mid_pnl", "spread_cost", "net_pnl"):
+            values = trades[column].to_numpy(dtype=float)
+
+            for statistic_name, statistic in (("total", np.sum), ("mean", np.mean)):
+                result = block_bootstrap(
+                    values,
+                    statistic,
+                    block_size=min(config.trade_block_size, len(values)),
+                    n_resamples=config.n_resamples,
+                )
+                backtest_rows.append(
+                    {
+                        "split": split_name,
+                        "trades": len(trades),
+                        "quantity": column,
+                        "statistic": statistic_name,
+                        **result,
+                    }
+                )
+
+    backtest_summary = pd.DataFrame(backtest_rows)
+
+    print(
+        f"\nBacktest PnL ($), zero latency, threshold {config.signal_threshold}, "
+        f"blocks of {config.trade_block_size} trades, 95% intervals:"
+    )
+    print(
+        backtest_summary.loc[backtest_summary["statistic"].eq("total")]
+        .set_index(["split", "quantity"])
+        .drop(columns="statistic")
+        .round(3)
+        .to_string()
+    )
+
+    backtest_summary.to_csv(output_dir / "backtest_intervals.csv", index=False)
+
+    print(f"\nResults saved to: {output_dir}")
+
+
+EXPERIMENTS = {
+    "baseline_v1": experiment_baseline_v1,
+    "mlp_multiseed": experiment_mlp_multiseed,
+    "uncertainty_v1": experiment_uncertainty_v1,
+}
+
+
+def run_experiment(experiment: str, config: ExperimentConfig, output_dir=None):
+    """Create a new result directory; never overwrite an existing run."""
+    if experiment not in EXPERIMENTS:
+        raise ValueError(f"Unknown experiment: {experiment}")
+    if output_dir is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        output_dir = config.project_root / "reports" / "runs" / (
+            f"{experiment}_{stamp}_{uuid.uuid4().hex[:8]}"
+        )
+    output_dir = Path(output_dir).resolve()
+    # This fails before loading data or fitting if the destination exists.
+    output_dir.mkdir(parents=True, exist_ok=False)
+    status_path = output_dir / "status.json"
+    write_json(status_path, {"status": "running"})
+    print(f"Output directory: {output_dir}", flush=True)
+    try:
+        save_manifest(config, experiment, output_dir)
+        data = prepare_experiment(config)
+        write_json(output_dir / "dataset_summary.json", {
+            name: {
+                "slice_start": selection.start, "slice_stop": selection.stop,
+                "usable_rows": len(data["datasets_ofi"][name][0]),
+                "first_event": int(data["datasets_ofi"][name][0].index[0]),
+                "last_event": int(data["datasets_ofi"][name][0].index[-1]),
+            }
+            for name, selection in data["splits"].items()
+        })
+        EXPERIMENTS[experiment](data, config, output_dir)
+    except BaseException as error:
+        write_json(status_path, {"status": "failed", "error": str(error),
+                                 "error_type": type(error).__name__})
+        raise
+    write_json(status_path, {"status": "completed"})
+    return output_dir
