@@ -25,7 +25,15 @@ from lob.features import (build_basic_features, compute_depth_imbalance,
 from lob.models import fit_baseline, fit_boosting, fit_logistic, fit_mlp
 from lob.labels import make_targets
 from lob.splits import make_temporal_splits, prepare_datasets
+from lob.message_features import (
+    compute_activity_features,
+    compute_depth_features,
+    compute_flow_features,
+    compute_noise_feature,
+    compute_trade_features,
+)
 from lob.uncertainty import block_bootstrap, bootstrap_group_means
+from sklearn.inspection import permutation_importance
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,11 @@ class ExperimentConfig:
     event_block_sizes: tuple[int, ...] = (500, 2_000, 5_000)
     trade_block_size: int = 25
     n_resamples: int = 1_000
+    # Message, activity and depth feature families; noise is a control.
+    activity_windows: tuple[int, ...] = (50, 100)
+    depth_levels: int = 5
+    noise_seed: int = 0
+    permutation_repeats: int = 5
 
     @property
     def data_dir(self):
@@ -751,10 +764,196 @@ def experiment_uncertainty_v1(data: dict, config: ExperimentConfig, output_dir: 
     print(f"\nResults saved to: {output_dir}")
 
 
+def build_feature_families(data: dict, config: ExperimentConfig) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+    """Join message, activity, depth and noise features to the book features."""
+
+    events = data["events"]
+    features = data["features"]
+
+    extra = [
+        compute_trade_features(events, windows=config.windows),
+        compute_flow_features(events, windows=config.windows),
+        compute_activity_features(events, windows=config.activity_windows),
+        compute_depth_features(events, n_levels=config.depth_levels),
+        compute_noise_feature(events.index, random_state=config.noise_seed).to_frame(),
+    ]
+
+    for frame in extra:
+        if not frame.index.equals(features.index):
+            raise ValueError("all feature frames must share the event index")
+
+        overlap = set(frame.columns) & set(features.columns)
+        if overlap:
+            raise ValueError(f"duplicate feature names: {sorted(overlap)}")
+
+        features = features.join(frame)
+
+    families = {
+        "book": list(config.feature_columns),
+        "ofi": [f"ofi_{w}" for w in config.windows],
+        "trades": [
+            f"{name}_{w}"
+            for w in config.windows
+            for name in ("signed_trade_volume", "trade_volume")
+        ],
+        "flow": [
+            f"{name}_{w}"
+            for w in config.windows
+            for name in ("net_order_flow", "cancel_volume")
+        ],
+        "activity": ["log_time_gap"]
+        + [f"event_rate_{w}" for w in config.activity_windows],
+        "depth": [
+            "log_bid_size_1",
+            "log_ask_size_1",
+            f"log_bid_depth_{config.depth_levels}",
+            f"log_ask_depth_{config.depth_levels}",
+        ],
+        "noise": ["noise"],
+    }
+
+    return features, families
+
+
+def experiment_features_v1(data: dict, config: ExperimentConfig, output_dir: Path) -> None:
+    """Add feature families one at a time, ablate them, and rank by permutation.
+
+    Every feature set is evaluated on the same validation rows. The noise
+    column is a control: a family that does not beat it adds nothing.
+    """
+
+    targets = data["targets"]
+    splits = data["splits"]
+
+    features, families = build_feature_families(data, config)
+    all_columns = [col for family in families.values() for col in family]
+
+    # One shared row mask so every feature set sees identical observations.
+    datasets = prepare_datasets(features, targets, splits, all_columns)
+    X_train, y_train = datasets["train"]
+    X_validation, y_validation = datasets["validation"]
+
+    print(
+        f"\nShared rows: {len(y_train):,} train | {len(y_validation):,} validation "
+        f"| {len(all_columns)} candidate features"
+    )
+
+    reference = families["book"] + families["ofi"]
+    real_families = [name for name in families if name not in ("book", "ofi", "noise")]
+    full = reference + [col for name in real_families for col in families[name]]
+
+    feature_sets = {"reference": reference}
+    for name in real_families + ["noise"]:
+        feature_sets[f"reference+{name}"] = reference + families[name]
+    feature_sets["all"] = full
+    for name in ["ofi"] + real_families:
+        feature_sets[f"all-{name}"] = [col for col in full if col not in families[name]]
+    feature_sets["all+noise"] = full + families["noise"]
+
+    write_json(output_dir / "feature_sets.json", feature_sets)
+    write_json(output_dir / "feature_families.json", families)
+
+    rows = []
+    fitted = {}
+
+    for set_name, columns in feature_sets.items():
+        for model_name, fit in (("logistic", fit_logistic), ("boosting", fit_boosting)):
+            model = fit(X_train[columns], y_train)
+            metrics = evaluate_model(model, X_validation[columns], y_validation)
+            fitted[(set_name, model_name)] = model
+
+            rows.append(
+                {
+                    "feature_set": set_name,
+                    "model": model_name,
+                    "n_features": len(columns),
+                    **metrics,
+                }
+            )
+
+            print(
+                f"{set_name:<20} {model_name:<9} {len(columns):>3} features | "
+                f"log loss {metrics['log_loss']:.6f} | "
+                f"accuracy {metrics['accuracy']:.4f}",
+                flush=True,
+            )
+
+    results = pd.DataFrame(rows)
+
+    # Gain relative to the 14-feature reference, per model.
+    reference_loss = results.loc[results["feature_set"].eq("reference")].set_index("model")["log_loss"]
+    results["log_loss_vs_reference"] = results["log_loss"] - results["model"].map(reference_loss)
+
+    full_loss = results.loc[results["feature_set"].eq("all")].set_index("model")["log_loss"]
+    results["log_loss_vs_all"] = results["log_loss"] - results["model"].map(full_loss)
+
+    print("\nValidation log loss by feature set:")
+    print(
+        results.pivot(index="feature_set", columns="model", values="log_loss")
+        .loc[list(feature_sets)]
+        .round(6)
+        .to_string()
+    )
+
+    results.to_csv(output_dir / "validation_metrics_by_feature_set.csv", index=False)
+
+    # Permutation importance of the boosting model with the noise control.
+    columns = feature_sets["all+noise"]
+    model = fitted[("all+noise", "boosting")]
+
+    importance = permutation_importance(
+        model,
+        X_validation[columns],
+        y_validation,
+        scoring="neg_log_loss",
+        n_repeats=config.permutation_repeats,
+        random_state=config.noise_seed,
+        n_jobs=1,
+    )
+
+    column_family = {col: name for name, cols in families.items() for col in cols}
+
+    importance_table = pd.DataFrame(
+        {
+            "feature": columns,
+            "family": [column_family[col] for col in columns],
+            "log_loss_increase": importance.importances_mean,
+            "std": importance.importances_std,
+        }
+    ).sort_values("log_loss_increase", ascending=False)
+
+    noise_level = float(
+        importance_table.loc[importance_table["feature"].eq("noise"), "log_loss_increase"].iloc[0]
+    )
+    importance_table["above_noise"] = importance_table["log_loss_increase"] > noise_level
+
+    print(
+        f"\nPermutation importance on validation (boosting, all+noise, "
+        f"{config.permutation_repeats} repeats), increase in log loss:"
+    )
+    print(importance_table.round(6).to_string(index=False))
+
+    importance_table.to_csv(output_dir / "permutation_importance.csv", index=False)
+
+    family_importance = (
+        importance_table.groupby("family")["log_loss_increase"]
+        .agg(["sum", "mean", "max", "count"])
+        .sort_values("sum", ascending=False)
+    )
+
+    print("\nPermutation importance by family:")
+    print(family_importance.round(6).to_string())
+
+    family_importance.to_csv(output_dir / "permutation_importance_by_family.csv")
+
+    print(f"\nResults saved to: {output_dir}")
+
+
 EXPERIMENTS = {
     "baseline_v1": experiment_baseline_v1,
     "mlp_multiseed": experiment_mlp_multiseed,
     "uncertainty_v1": experiment_uncertainty_v1,
+    "features_v1": experiment_features_v1,
 }
 
 
