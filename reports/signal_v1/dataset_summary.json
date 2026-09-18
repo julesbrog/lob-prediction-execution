@@ -1,0 +1,23 @@
+{
+  "train": {
+    "slice_start": 0,
+    "slice_stop": 240184,
+    "usable_rows": 240084,
+    "first_event": 100,
+    "last_event": 240183
+  },
+  "validation": {
+    "slice_start": 240234,
+    "slice_stop": 320262,
+    "usable_rows": 80028,
+    "first_event": 240234,
+    "last_event": 320261
+  },
+  "test": {
+    "slice_start": 320312,
+    "slice_stop": 400341,
+    "usable_rows": 80029,
+    "first_event": 320312,
+    "last_event": 400340
+  }
+}

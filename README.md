@@ -181,6 +181,27 @@ closed by a threshold or a seed: on this day and at this horizon, the
 directional edge is an order of magnitude smaller than the cost of crossing
 the spread twice.
 
+### Does the better model change the execution picture?
+
+`signal_v1` repeats the decile and backtest analysis on validation for the
+14-feature reference and the 33-feature model, both boosting.
+
+| Validation, boosting | 14 features | 33 features |
+|---|---:|---:|
+| Favourable move in the two extreme deciles (cents, 95% interval) | 2.11 [1.82, 2.43] | 2.62 [2.29, 2.92] |
+| Decile 10 / decile 1 mean move (cents) | +2.31 / −1.92 | +2.66 / −2.59 |
+| Backtest, threshold 0.3: trades, mid-price PnL per trade | 1,039, 1.8 c | 1,229, 2.1 c |
+| Backtest, threshold 0.6: trades, mid-price PnL per trade | 122, 2.7 c | 236, 3.8 c |
+| Spread cost per trade (cents) | 13.4 | 13.2 |
+
+The gain in log loss is a gain in cents too, about 25% more favourable
+movement in the extreme deciles, and the full model is better at every
+threshold. It is still nowhere near the spread: at the most selective
+threshold, 3.8 cents of signal against 13 cents of cost. Improving the
+prediction was worth doing and does not rescue aggressive execution at this
+horizon, which is the reason the next step is passive execution rather than
+a bigger model.
+
 ## Code layout
 
 | File | Responsibility |
@@ -233,6 +254,7 @@ python run_experiment.py baseline_v1      # models, diagnostics, backtests, the 
 python run_experiment.py mlp_multiseed    # MLP on validation, 5 seeds
 python run_experiment.py uncertainty_v1   # block bootstrap intervals
 python run_experiment.py features_v1      # message-file feature families, ablations, permutation importance
+python run_experiment.py signal_v1        # signal in cents, reference versus full feature set (validation)
 python make_figures.py                    # figures from the reference folders
 python -m pytest -q
 ```
@@ -257,9 +279,7 @@ limit-order model has to handle queue position, cancellations ahead of the
 order, partial fills and the fact that filled orders are not a random sample
 of signals.
 
-Planned, in order: check whether the 33-feature signal is large enough in
-cents to change the execution conclusion (validation only); event versus
-clock-time horizons and decisions after estimated costs;
-more sessions with a fresh reserved test block; then a passive execution
-simulator with explicit fill assumptions and an aggressive / passive / abstain
-policy.
+Planned, in order: a passive execution simulator with explicit queue and
+fill assumptions, then an aggressive / passive / abstain policy; event
+versus clock-time horizons and decisions after estimated costs;
+more sessions with a fresh reserved test block.
